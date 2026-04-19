@@ -135,15 +135,23 @@ export default function Home() {
           setTimeout(() => setFlashEvent(null), 3500);
         }
 
-        // ─── 일반 가격 변동 (중력↓, 변동성↑ → 방향 예측 어려워짐) ─────────
-        // 모멘텀: 관성을 키움 (0.0002 → 0.0008)
-        trendRef.current = (trendRef.current * 0.92) + ((Math.random() - 0.5) * 0.0008);
-        // 중력: 기준가 회귀력을 크게 줄임 (0.02 → 0.003)
+        // ─── 일반 가격 변동 (급반전 + 변동폭 대폭 확대) ─────────────────────
+        // 모멘텀 입력폭 확대: 0.0008 → 0.0020 (2.5배)
+        trendRef.current = (trendRef.current * 0.50) + ((Math.random() - 0.5) * 0.0020);
+
+        // ── 랜덤 방향 반전: 매 틱 20% 확률로 추세 강제 역전 ──────────────────
+        if (Math.random() < 0.20) {
+          trendRef.current = -trendRef.current * (0.8 + Math.random() * 0.6);
+        }
+
         const gravity = (BASE_PRICE - prev) * 0.003;
-        // 노이즈: 잔파동 폭을 키움 (0.0001 → 0.0005)
-        const noise = (Math.random() - 0.5) * 0.0005;
+        // 노이즈 확대: 0.0008 → 0.0018 (2배 이상)
+        const noise = (Math.random() - 0.5) * 0.0018;
         const change = trendRef.current + gravity + noise;
         const newPrice = Math.max(0.01, (prev + change) * flashMultiplier);
+
+
+
 
         const isNewCandle = tickRef.current % 5 === 0;
         const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
