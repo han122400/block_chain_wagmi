@@ -193,16 +193,7 @@ export default function Home() {
   };
 
   // 2. 컨트랙트 데이터 읽기
-  // ─── Optimistic UI 상태 ────────────────────────────────────────────────────
-  // 트랜잭션 제출 즉시 화면에 반영, 온체인 확정 후 동기화
-  const [optimisticPosition, setOptimisticPosition] = useState<{
-    margin: number;
-    entryPrice: number;
-    leverage: number;
-    isLong: boolean;
-    timestamp: number;
-    isPending?: boolean;
-  } | 'CLOSED' | null>(null)
+    // Optimistic UI 완전히 제거 -- 온체인 확정 시에만 포지션 렌더링
 
   // ─── 풀 잔액: 3초마다 자동 폴링 → 다른 사용자가 포지션을 잡으면 실시간 반영 ───
   const { data: balance, refetch: refetchBalance } = useReadContract({
@@ -243,18 +234,8 @@ export default function Home() {
     };
   }, [positionData])
 
-  // ─── 실제 화면 표시에 사용할 포지션: 온체인 데이터가 있으면 우선, 없으면 optimistic 사용
-  const activePosition = useMemo(() => {
-    // 종료되거나 청산 진행 중인 경우 강제로 화면에서 지움
-    if (optimisticPosition === 'CLOSED') return null;
-    if (onChainPosition) {
-      // 온체인 확정된 데이터가 돌아오면 optimistic 심프로시스 클리어
-      if (optimisticPosition) setOptimisticPosition(null);
-      return onChainPosition;
-    }
-    // 온체인 데이터 없으면 optimistic 데이터 사용 (대기 중 표시)
-    return optimisticPosition ? { ...optimisticPosition } : null;
-  }, [onChainPosition, optimisticPosition])
+  // ─── 실제 화면 표시에 사용할 포지션: 온체인 데이터만 사용
+  const activePosition = onChainPosition;
 
   // ── 청산가 계산 ─────────────────────────────────────────────────────────────
   const liquidationPrice = useMemo(() => {
@@ -313,8 +294,6 @@ export default function Home() {
     if (isLiquidated) {
       liquidatedRef.current = true;
       setLiquidationAlert(true);
-      // 예측 불가능한 UI 변동을 막기 위해 강제 청산 즉시 포지션 숨김
-      setOptimisticPosition('CLOSED');
       // 자동으로 청산 트랜잭션 제출
       writeContract({
         address: TIPJAR_ADDRESS, abi: TIPJAR_ABI, functionName: 'closePosition',
@@ -341,16 +320,7 @@ export default function Home() {
       return;
     }
 
-    // ─── Optimistic UI: 제출 즉시 포지션을 화면에 표시 ───
-    setOptimisticPosition({
-      margin: Number(marginAmount),
-      entryPrice: currentPrice,
-      leverage,
-      isLong: isLongSelection,
-      timestamp: Math.floor(Date.now() / 1000),
-      isPending: true,
-    });
-
+    // 트랜잭션 전송
     writeContract({
       address: TIPJAR_ADDRESS, abi: TIPJAR_ABI, functionName: 'openPosition',
       args: [BigInt(Math.floor(currentPrice * 1e8)), BigInt(leverage), isLongSelection],
@@ -366,8 +336,6 @@ export default function Home() {
   }
 
   const handleClosePosition = () => {
-    // Optimistic UI: 종료 제출 즉시 화면에서 포지션 클리어 및 정지
-    setOptimisticPosition('CLOSED');
     writeContract({
       address: TIPJAR_ADDRESS, abi: TIPJAR_ABI, functionName: 'closePosition',
       args: [BigInt(Math.floor(currentPrice * 1e8))]
