@@ -193,10 +193,21 @@ export default function Home() {
   };
 
   // 2. 컨트랙트 데이터 읽기
-  // ─── 풀 잔액: 5초마다 자동 폴링 → 다른 사용자가 포지션을 잡으면 실시간 반영 ───
+  // ─── Optimistic UI 상태 ────────────────────────────────────────────────────
+  // 트랜잭션 제출 즉시 화면에 반영, 온체인 확정 후 동기화
+  const [optimisticPosition, setOptimisticPosition] = useState<{
+    margin: number;
+    entryPrice: number;
+    leverage: number;
+    isLong: boolean;
+    timestamp: number;
+    isPending?: boolean;
+  } | null>(null)
+
+  // ─── 풀 잔액: 3초마다 자동 폴링 → 다른 사용자가 포지션을 잡으면 실시간 반영 ───
   const { data: balance, refetch: refetchBalance } = useReadContract({
     address: TIPJAR_ADDRESS, abi: TIPJAR_ABI, functionName: 'getContractBalance',
-    query: { refetchInterval: 5000 }  // 5초마다 자동 갱신
+    query: { refetchInterval: 3000 }  // 3초마다 자동 갱신
   })
   const { data: owner } = useReadContract({
     address: TIPJAR_ADDRESS, abi: TIPJAR_ABI, functionName: 'owner'
@@ -209,17 +220,17 @@ export default function Home() {
   const { data: positionData, refetch: refetchPosition } = useReadContract({
     address: TIPJAR_ADDRESS, abi: TIPJAR_ABI, functionName: 'userPositions',
     args: [address as `0x${string}`],
-    query: { enabled: !!address, refetchInterval: 5000 }  // 5초마다 자동 갱신
+    query: { enabled: !!address, refetchInterval: 3000 }  // 3초마다 자동 갱신
   })
   // ─── 거래 기록: 5초마다 자동 폴링 → 다른 사용자 거래도 실시간 반영 ────────────
   const { data: tradeHistory, refetch: refetchHistory } = useReadContract({
     address: TIPJAR_ADDRESS, abi: TIPJAR_ABI, functionName: 'getHistory', args: [BigInt(10)],
-    query: { refetchInterval: 5000 }  // 5초마다 자동 갱신
+    query: { refetchInterval: 3000 }  // 3초마다 자동 갱신
   })
 
 
   // 포지션 데이터 파싱
-  const activePosition = useMemo(() => {
+  const onChainPosition = useMemo(() => {
     if (!positionData) return null;
     const [margin, entryPrice, leverageValue, isLongBool, timestamp, isOpen] = positionData as any;
     if (!isOpen) return null;
@@ -231,6 +242,17 @@ export default function Home() {
       timestamp: Number(timestamp)
     };
   }, [positionData])
+
+  // ─── 실제 화면 표시에 사용할 포지션: 온체인 데이터가 있으면 우선, 없으면 optimistic 사용
+  const activePosition = useMemo(() => {
+    if (onChainPosition) {
+      // 온체인 확정된 데이터가 돌아오면 optimistic 심프로시스 클리어
+      if (optimisticPosition) setOptimisticPosition(null);
+      return onChainPosition;
+    }
+    // 온체인 데이터 없으면 optimistic 데이터 사용 (대기 중 표시)
+    return optimisticPosition ? { ...optimisticPosition } : null;
+  }, [onChainPosition, optimisticPosition])
 
   // ── 청산가 계산 ─────────────────────────────────────────────────────────────
   const liquidationPrice = useMemo(() => {
@@ -314,6 +336,17 @@ export default function Home() {
       alert("투자 가능 수량은 0.00001 ~ 0.001 ETH 사이입니다.");
       return;
     }
+
+    // ─── Optimistic UI: 제출 즉시 포지션을 화면에 표시 ───
+    setOptimisticPosition({
+      margin: Number(marginAmount),
+      entryPrice: currentPrice,
+      leverage,
+      isLong: isLongSelection,
+      timestamp: Math.floor(Date.now() / 1000),
+      isPending: true,
+    });
+
     writeContract({
       address: TIPJAR_ADDRESS, abi: TIPJAR_ABI, functionName: 'openPosition',
       args: [BigInt(Math.floor(currentPrice * 1e8)), BigInt(leverage), isLongSelection],
@@ -329,6 +362,8 @@ export default function Home() {
   }
 
   const handleClosePosition = () => {
+    // Optimistic UI: 종료 제출 즉시 화면에서 포지션 클리어
+    setOptimisticPosition(null);
     writeContract({
       address: TIPJAR_ADDRESS, abi: TIPJAR_ABI, functionName: 'closePosition',
       args: [BigInt(Math.floor(currentPrice * 1e8))]
