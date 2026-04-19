@@ -121,25 +121,27 @@ export default function Home() {
         flashCooldownRef.current = Math.max(0, flashCooldownRef.current - 1);
 
         // ─── Flash 이벤트 발생 로직 ──────────────────────────────────────────
-        // 쿨타임(30틱=30초) 이후, 매 틱 5% 확률로 발생
+        // 쿨타임(60틱=60초) 이후, 매 틱 2% 확률 → 발생 빈도를 크게 줄임
         let flashMultiplier = 1;
-        if (flashCooldownRef.current === 0 && Math.random() < 0.05) {
+        if (flashCooldownRef.current === 0 && Math.random() < 0.02) {
           const isPump = Math.random() > 0.5;
-          // 급등락 폭: 8% ~ 18% 랜덤
-          const magnitude = 0.08 + Math.random() * 0.10;
+          // 급등락 폭: 5% ~ 12% 랜덤 (이전 8~18% → 완화)
+          const magnitude = 0.05 + Math.random() * 0.07;
           flashMultiplier = isPump ? (1 + magnitude) : (1 - magnitude);
-          flashCooldownRef.current = 30;
+          flashCooldownRef.current = 60;
 
           const eventInfo: FlashEvent = { type: isPump ? 'PUMP' : 'CRASH', magnitude: Math.round(magnitude * 100) };
           setFlashEvent(eventInfo);
-          // 3.5초 후 알림 해제
           setTimeout(() => setFlashEvent(null), 3500);
         }
 
-        // ─── 일반 가격 변동 ──────────────────────────────────────────────────
-        trendRef.current = (trendRef.current * 0.85) + ((Math.random() - 0.5) * 0.0002);
-        const gravity = (BASE_PRICE - prev) * 0.02;
-        const noise = (Math.random() - 0.5) * 0.0001;
+        // ─── 일반 가격 변동 (중력↓, 변동성↑ → 방향 예측 어려워짐) ─────────
+        // 모멘텀: 관성을 키움 (0.0002 → 0.0008)
+        trendRef.current = (trendRef.current * 0.92) + ((Math.random() - 0.5) * 0.0008);
+        // 중력: 기준가 회귀력을 크게 줄임 (0.02 → 0.003)
+        const gravity = (BASE_PRICE - prev) * 0.003;
+        // 노이즈: 잔파동 폭을 키움 (0.0001 → 0.0005)
+        const noise = (Math.random() - 0.5) * 0.0005;
         const change = trendRef.current + gravity + noise;
         const newPrice = Math.max(0.01, (prev + change) * flashMultiplier);
 
@@ -193,8 +195,10 @@ export default function Home() {
   };
 
   // 2. 컨트랙트 데이터 읽기
+  // ─── 풀 잔액: 5초마다 자동 폴링 → 다른 사용자가 포지션을 잡으면 실시간 반영 ───
   const { data: balance, refetch: refetchBalance } = useReadContract({
-    address: TIPJAR_ADDRESS, abi: TIPJAR_ABI, functionName: 'getContractBalance'
+    address: TIPJAR_ADDRESS, abi: TIPJAR_ABI, functionName: 'getContractBalance',
+    query: { refetchInterval: 5000 }  // 5초마다 자동 갱신
   })
   const { data: owner } = useReadContract({
     address: TIPJAR_ADDRESS, abi: TIPJAR_ABI, functionName: 'owner'
@@ -207,11 +211,14 @@ export default function Home() {
   const { data: positionData, refetch: refetchPosition } = useReadContract({
     address: TIPJAR_ADDRESS, abi: TIPJAR_ABI, functionName: 'userPositions',
     args: [address as `0x${string}`],
-    query: { enabled: !!address }
+    query: { enabled: !!address, refetchInterval: 5000 }  // 5초마다 자동 갱신
   })
+  // ─── 거래 기록: 5초마다 자동 폴링 → 다른 사용자 거래도 실시간 반영 ────────────
   const { data: tradeHistory, refetch: refetchHistory } = useReadContract({
-    address: TIPJAR_ADDRESS, abi: TIPJAR_ABI, functionName: 'getHistory', args: [BigInt(10)]
+    address: TIPJAR_ADDRESS, abi: TIPJAR_ABI, functionName: 'getHistory', args: [BigInt(10)],
+    query: { refetchInterval: 5000 }  // 5초마다 자동 갱신
   })
+
 
   // 포지션 데이터 파싱
   const activePosition = useMemo(() => {
@@ -330,10 +337,10 @@ export default function Home() {
     })
   }
 
-  const handleDepositLiquidity = () => {
+  const handleDepositLiquidity = (amount: string) => {
     writeContract({
       address: TIPJAR_ADDRESS, abi: TIPJAR_ABI, functionName: 'depositInitialLiquidity',
-      value: parseEther("0.03")
+      value: parseEther(amount)
     })
   }
 
@@ -565,19 +572,19 @@ export default function Home() {
                       />
                     )}
 
-                    {/* ── 진입가 수평선 ── */}
+                    {/* ── 진입가 수평선 (굵은 실선 + 진입 타점 표시) ── */}
                     {activePosition && (
                       <ReferenceLine
                         y={activePosition.entryPrice}
                         stroke={activePosition.isLong ? '#0ecb81' : '#f6465d'}
-                        strokeDasharray="4 4"
-                        strokeWidth={1}
+                        strokeDasharray="0"
+                        strokeWidth={2}
                         label={{
-                          value: `진입가 ${activePosition.entryPrice.toFixed(5)}`,
+                          value: `● 진입가 ${activePosition.entryPrice.toFixed(6)} (${activePosition.isLong ? 'LONG' : 'SHORT'})`,
                           position: 'insideBottomLeft',
                           fill: activePosition.isLong ? '#0ecb81' : '#f6465d',
-                          fontSize: 10,
-                          fontWeight: 600,
+                          fontSize: 11,
+                          fontWeight: 700,
                         }}
                       />
                     )}
@@ -905,12 +912,23 @@ export default function Home() {
                   <p className="text-sm font-black text-[#0ecb81]">HEALTHY</p>
                 </div>
               </div>
-              <button
-                onClick={handleDepositLiquidity} disabled={isPending || isConfirming}
-                className="w-full bg-[#fcd535] text-black hover:bg-[#fcd535]/80 py-3 rounded-lg text-xs font-bold transition flex items-center justify-center gap-2 mb-2"
-              >
-                <ArrowRightLeft className="w-4 h-4" /> 유동성 0.03 ETH 추가 공급
-              </button>
+              {/* 유동성 단계별 공급 버튼 */}
+              <div className="space-y-2">
+                <p className="text-[10px] text-[#848e9c] font-bold mb-1">유동성 공급 (ETH)</p>
+                <div className="grid grid-cols-3 gap-2">
+                  {['0.05', '0.1', '0.5'].map(amt => (
+                    <button
+                      key={amt}
+                      onClick={() => handleDepositLiquidity(amt)}
+                      disabled={isPending || isConfirming}
+                      className="bg-[#fcd535] text-black hover:bg-[#f2c94c] py-2 rounded-lg text-xs font-black transition flex items-center justify-center gap-1 disabled:opacity-50"
+                    >
+                      <ArrowRightLeft className="w-3 h-3" />
+                      +{amt}
+                    </button>
+                  ))}
+                </div>
+              </div>
               <button
                 onClick={handleWithdraw} disabled={isPending || isConfirming}
                 className="w-full border border-[#f6465d] text-[#f6465d] hover:bg-[#f6465d]/10 py-3 rounded-lg text-[10px] font-bold transition"
