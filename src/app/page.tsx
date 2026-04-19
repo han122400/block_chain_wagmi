@@ -10,19 +10,30 @@ import {
 } from 'recharts'
 import { Wallet, LogOut, TrendingUp, TrendingDown, Clock, ArrowRightLeft, Wallet2, BarChart3, Key, ArrowRight, AlertTriangle, Zap } from 'lucide-react'
 
-// ─── 청산가 공식 (HARD MODE) ──────────────────────────────────────────────────
-// LONG  : liqPrice = entryPrice * (1 - 1/leverage + maintenanceMarginRate)
-// SHORT : liqPrice = entryPrice * (1 + 1/leverage - maintenanceMarginRate)
-// ⚠️ 유지증거금률을 5%로 상향 → 청산가가 진입가에 더 가까워짐 (난이도 상승)
-const MAINTENANCE_MARGIN_RATE = 0.05;
+// ─── 청산가 공식 (수정된 HARD MODE) ───────────────────────────────────────────
+// 핵심 원칙:
+//   LONG  청산가 < 진입가  (가격이 내려가야 청산)
+//   SHORT 청산가 > 진입가  (가격이 올라가야 청산)
+//
+// 올바른 공식: 증거금의 (1 - MMR) 비율을 소진하면 청산
+//   LONG  : liqPrice = entryPrice × (1 - (1 - MMR) / leverage)
+//   SHORT : liqPrice = entryPrice × (1 + (1 - MMR) / leverage)
+//
+// 이전 공식(+MMR 방식)은 leverage > 1/MMR (= 20배 이상)일 때 청산가가 뒤집히는 버그가 있음.
+// MMR = 0.05 → 증거금의 95% 날리면 청산 (HARD MODE: 원래는 97~99%)
+const MAINTENANCE_MARGIN_RATE = 0.05; // 유지증거금률 5% → 청산 버퍼 95%
 
 function calcLiquidationPrice(entryPrice: number, leverage: number, isLong: boolean): number {
+  const bufferRatio = 1 - MAINTENANCE_MARGIN_RATE; // 0.95 (증거금의 95% 소진 시 청산)
   if (isLong) {
-    return entryPrice * (1 - 1 / leverage + MAINTENANCE_MARGIN_RATE);
+    // 항상 진입가보다 낮음 (내려가야 청산)
+    return entryPrice * (1 - bufferRatio / leverage);
   } else {
-    return entryPrice * (1 + 1 / leverage - MAINTENANCE_MARGIN_RATE);
+    // 항상 진입가보다 높음 (올라가야 청산)
+    return entryPrice * (1 + bufferRatio / leverage);
   }
 }
+
 
 // Flash 이벤트 타입
 type FlashEvent = { type: 'PUMP' | 'CRASH'; magnitude: number } | null;
