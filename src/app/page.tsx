@@ -10,26 +10,20 @@ import {
 } from 'recharts'
 import { Wallet, LogOut, TrendingUp, TrendingDown, Clock, ArrowRightLeft, Wallet2, BarChart3, Key, ArrowRight, AlertTriangle, Zap } from 'lucide-react'
 
-// ─── 청산가 공식 (수정된 HARD MODE) ───────────────────────────────────────────
-// 핵심 원칙:
-//   LONG  청산가 < 진입가  (가격이 내려가야 청산)
-//   SHORT 청산가 > 진입가  (가격이 올라가야 청산)
-//
-// 올바른 공식: 증거금의 (1 - MMR) 비율을 소진하면 청산
-//   LONG  : liqPrice = entryPrice × (1 - (1 - MMR) / leverage)
-//   SHORT : liqPrice = entryPrice × (1 + (1 - MMR) / leverage)
-//
-// 이전 공식(+MMR 방식)은 leverage > 1/MMR (= 20배 이상)일 때 청산가가 뒤집히는 버그가 있음.
-// MMR = 0.05 → 증거금의 95% 날리면 청산 (HARD MODE: 원래는 97~99%)
-const MAINTENANCE_MARGIN_RATE = 0.05; // 유지증거금률 5% → 청산 버퍼 95%
+// ─── 청산가 공식 (MAXIMUM HARD MODE) ─────────────────────────────────────────
+// MMR = 0.50 → 증거금의 50% 소진하면 바로 청산
+// bufferRatio = 0.50
+//   LONG  10x: liqPrice = entry × (1 - 0.50/10)  = entry × 0.95  → 5% 하락 시 청산
+//   LONG  50x: liqPrice = entry × (1 - 0.50/50)  = entry × 0.99  → 1% 하락 시 청산
+//   LONG 100x: liqPrice = entry × (1 - 0.50/100) = entry × 0.995 → 0.5% 하락 시 청산
+// 변동폭이 ±10%/틱이므로 대부분의 포지션이 수 초 내 청산됨
+const MAINTENANCE_MARGIN_RATE = 0.50; // 유지증거금률 50% (극한 모드)
 
 function calcLiquidationPrice(entryPrice: number, leverage: number, isLong: boolean): number {
-  const bufferRatio = 1 - MAINTENANCE_MARGIN_RATE; // 0.95 (증거금의 95% 소진 시 청산)
+  const bufferRatio = 1 - MAINTENANCE_MARGIN_RATE; // 0.50
   if (isLong) {
-    // 항상 진입가보다 낮음 (내려가야 청산)
     return entryPrice * (1 - bufferRatio / leverage);
   } else {
-    // 항상 진입가보다 높음 (올라가야 청산)
     return entryPrice * (1 + bufferRatio / leverage);
   }
 }
@@ -120,36 +114,32 @@ export default function Home() {
         tickRef.current += 1;
         flashCooldownRef.current = Math.max(0, flashCooldownRef.current - 1);
 
-        // ─── Flash 이벤트 발생 로직 ──────────────────────────────────────────
-        // 쿨타임(60틱=60초) 이후, 매 틱 2% 확률 → 발생 빈도를 크게 줄임
+        // ─── Flash 이벤트 (쿨타임 45초, 확률 3%) ───────────────────────────
         let flashMultiplier = 1;
-        if (flashCooldownRef.current === 0 && Math.random() < 0.02) {
+        if (flashCooldownRef.current === 0 && Math.random() < 0.03) {
           const isPump = Math.random() > 0.5;
-          // 급등락 폭: 5% ~ 12% 랜덤 (이전 8~18% → 완화)
           const magnitude = 0.05 + Math.random() * 0.07;
           flashMultiplier = isPump ? (1 + magnitude) : (1 - magnitude);
-          flashCooldownRef.current = 60;
-
+          flashCooldownRef.current = 45;
           const eventInfo: FlashEvent = { type: isPump ? 'PUMP' : 'CRASH', magnitude: Math.round(magnitude * 100) };
           setFlashEvent(eventInfo);
           setTimeout(() => setFlashEvent(null), 3500);
         }
 
-        // ─── 일반 가격 변동 (급반전 + 변동폭 대폭 확대) ─────────────────────
-        // 모멘텀 입력폭 확대: 0.0008 → 0.0020 (2.5배)
-        trendRef.current = (trendRef.current * 0.50) + ((Math.random() - 0.5) * 0.0020);
+        // ─── 가격 변동 (MAXIMUM VOLATILITY) ─────────────────────────────────
+        // 모멘텀 폭 최대화: ±0.0040 (기존 대비 2배)
+        trendRef.current = (trendRef.current * 0.50) + ((Math.random() - 0.5) * 0.0040);
 
-        // ── 랜덤 방향 반전: 매 틱 20% 확률로 추세 강제 역전 ──────────────────
-        if (Math.random() < 0.20) {
-          trendRef.current = -trendRef.current * (0.8 + Math.random() * 0.6);
+        // 방향 반전: 매 틱 35% 확률 (기존 20%)
+        if (Math.random() < 0.35) {
+          trendRef.current = -trendRef.current * (0.9 + Math.random() * 0.8);
         }
 
         const gravity = (BASE_PRICE - prev) * 0.003;
-        // 노이즈 확대: 0.0008 → 0.0018 (2배 이상)
-        const noise = (Math.random() - 0.5) * 0.0018;
+        // 노이즈 최대화: ±0.0028
+        const noise = (Math.random() - 0.5) * 0.0028;
         const change = trendRef.current + gravity + noise;
         const newPrice = Math.max(0.01, (prev + change) * flashMultiplier);
-
 
 
 
@@ -924,7 +914,7 @@ export default function Home() {
               <div className="space-y-2">
                 <p className="text-[10px] text-[#848e9c] font-bold mb-1">유동성 공급 (ETH)</p>
                 <div className="grid grid-cols-3 gap-2">
-                  {['0.05', '0.1', '0.5'].map(amt => (
+                  {['0.01', '0.05', '0.1'].map(amt => (
                     <button
                       key={amt}
                       onClick={() => handleDepositLiquidity(amt)}
