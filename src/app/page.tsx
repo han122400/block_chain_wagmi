@@ -10,11 +10,11 @@ import {
 } from 'recharts'
 import { Wallet, LogOut, TrendingUp, TrendingDown, Clock, ArrowRightLeft, Wallet2, BarChart3, Key, ArrowRight, AlertTriangle, Zap } from 'lucide-react'
 
-// ─── 바이낸스 선물 청산가 공식 ──────────────────────────────────────────────────
+// ─── 청산가 공식 (HARD MODE) ──────────────────────────────────────────────────
 // LONG  : liqPrice = entryPrice * (1 - 1/leverage + maintenanceMarginRate)
 // SHORT : liqPrice = entryPrice * (1 + 1/leverage - maintenanceMarginRate)
-// Binance 교차 마진 유지증거금률 ≈ 0.5% (0.005)
-const MAINTENANCE_MARGIN_RATE = 0.005;
+// ⚠️ 유지증거금률을 5%로 상향 → 청산가가 진입가에 더 가까워짐 (난이도 상승)
+const MAINTENANCE_MARGIN_RATE = 0.05;
 
 function calcLiquidationPrice(entryPrice: number, leverage: number, isLong: boolean): number {
   if (isLong) {
@@ -23,6 +23,9 @@ function calcLiquidationPrice(entryPrice: number, leverage: number, isLong: bool
     return entryPrice * (1 + 1 / leverage - MAINTENANCE_MARGIN_RATE);
   }
 }
+
+// Flash 이벤트 타입
+type FlashEvent = { type: 'PUMP' | 'CRASH'; magnitude: number } | null;
 
 export default function Home() {
   const { address, isConnected } = useAccount()
@@ -37,9 +40,31 @@ export default function Home() {
   const [liquidationAlert, setLiquidationAlert] = useState(false)
   const liquidatedRef = useRef(false) // 중복 청산 방지
 
+  // 가격 급등락 Flash 이벤트
+  const [flashEvent, setFlashEvent] = useState<FlashEvent>(null)
+  const flashCooldownRef = useRef(0) // Flash 이벤트 쿨타임 (틱 단위)
+
+  // ─── localStorage 키 상수 ────────────────────────────────────────────────
+  const LS_CANDLES_KEY = 'tipjar_candles_v1'
+  const LS_PRICE_KEY   = 'tipjar_price_v1'
+  // localStorage 저장은 캔들 증가 시에만 수행 (매 틱 저장 방지)
+  const lastSavedCandleCountRef = useRef(0)
+
   // 1. 캔들 엔진 (전문 거래소 로직)
-  const [currentPrice, setCurrentPrice] = useState(0.052450)
-  const [candles, setCandles] = useState<any[]>([])
+  const [currentPrice, setCurrentPrice] = useState<number>(() => {
+    if (typeof window === 'undefined') return 0.052450;
+    try {
+      const saved = localStorage.getItem(LS_PRICE_KEY);
+      return saved ? parseFloat(saved) : 0.052450;
+    } catch { return 0.052450; }
+  })
+  const [candles, setCandles] = useState<any[]>(() => {
+    if (typeof window === 'undefined') return [];
+    try {
+      const saved = localStorage.getItem(LS_CANDLES_KEY);
+      return saved ? JSON.parse(saved) : [];
+    } catch { return []; }
+  })
   const tickRef = useRef(0)
   const trendRef = useRef(0)
   const chartScrollRef = useRef<HTMLDivElement>(null)
@@ -55,24 +80,58 @@ export default function Home() {
     }
   }, [candles.length]);
 
+  // ─── candles 변경 시 localStorage 저장 (캔들 개수가 늘어날 때만) ──────────
   useEffect(() => {
-    const initialPrice = 0.052450;
-    setCandles([{
-      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-      open: initialPrice, close: initialPrice, high: initialPrice, low: initialPrice,
-      candleRange: [initialPrice, initialPrice]
-    }]);
+    if (candles.length === 0) return;
+    if (candles.length > lastSavedCandleCountRef.current) {
+      lastSavedCandleCountRef.current = candles.length;
+      try {
+        localStorage.setItem(LS_CANDLES_KEY, JSON.stringify(candles));
+        localStorage.setItem(LS_PRICE_KEY, String(candles[candles.length - 1].close));
+      } catch { /* 저장 실패 시 무시 (용량 초과 등) */ }
+    }
+  }, [candles]);
+
+  useEffect(() => {
+    // localStorage에 저장된 캔들이 없으면 초기 캔들 생성
+    if (candles.length === 0) {
+      const initialPrice = 0.052450;
+      setCandles([{
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+        open: initialPrice, close: initialPrice, high: initialPrice, low: initialPrice,
+        candleRange: [initialPrice, initialPrice]
+      }]);
+    }
 
     const interval = setInterval(() => {
       setCurrentPrice(prev => {
         const BASE_PRICE = 0.052450;
+        tickRef.current += 1;
+        flashCooldownRef.current = Math.max(0, flashCooldownRef.current - 1);
+
+        // ─── Flash 이벤트 발생 로직 ──────────────────────────────────────────
+        // 쿨타임(30틱=30초) 이후, 매 틱 5% 확률로 발생
+        let flashMultiplier = 1;
+        if (flashCooldownRef.current === 0 && Math.random() < 0.05) {
+          const isPump = Math.random() > 0.5;
+          // 급등락 폭: 8% ~ 18% 랜덤
+          const magnitude = 0.08 + Math.random() * 0.10;
+          flashMultiplier = isPump ? (1 + magnitude) : (1 - magnitude);
+          flashCooldownRef.current = 30;
+
+          const eventInfo: FlashEvent = { type: isPump ? 'PUMP' : 'CRASH', magnitude: Math.round(magnitude * 100) };
+          setFlashEvent(eventInfo);
+          // 3.5초 후 알림 해제
+          setTimeout(() => setFlashEvent(null), 3500);
+        }
+
+        // ─── 일반 가격 변동 ──────────────────────────────────────────────────
         trendRef.current = (trendRef.current * 0.85) + ((Math.random() - 0.5) * 0.0002);
         const gravity = (BASE_PRICE - prev) * 0.02;
         const noise = (Math.random() - 0.5) * 0.0001;
         const change = trendRef.current + gravity + noise;
-        const newPrice = Math.max(0.01, prev + change);
+        const newPrice = Math.max(0.01, (prev + change) * flashMultiplier);
 
-        tickRef.current += 1;
         const isNewCandle = tickRef.current % 5 === 0;
         const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
@@ -308,6 +367,56 @@ export default function Home() {
           </div>
         </div>
       )}
+
+      {/* ── Flash 이벤트 알림 (상단 중앙 화면 전체 폭) ────────────────────────── */}
+      {flashEvent && (
+        <div
+          className="fixed top-0 left-0 w-full z-[190] pointer-events-none"
+          style={{ animation: 'flashBanner 3.5s ease-out forwards' }}
+        >
+          <div
+            className={`w-full py-3 flex items-center justify-center gap-4
+              ${flashEvent.type === 'PUMP'
+                ? 'bg-gradient-to-r from-[#0ecb81] via-[#12e391] to-[#0ecb81] shadow-lg shadow-[#0ecb81]/50'
+                : 'bg-gradient-to-r from-[#f6465d] via-[#ff3a50] to-[#f6465d] shadow-lg shadow-[#f6465d]/50'
+              }`}
+          >
+            <span className="text-2xl">{flashEvent.type === 'PUMP' ? '🚀' : '💥'}</span>
+            <div className="text-center">
+              <p className="text-black font-black text-xl tracking-tight">
+                {flashEvent.type === 'PUMP' ? '⚡ FLASH PUMP' : '📉 FLASH CRASH'}
+                <span className="ml-2 text-black/70 text-base">+{flashEvent.magnitude}% 급변동 발생!</span>
+              </p>
+              <p className="text-black/80 text-xs font-bold">
+                {flashEvent.type === 'PUMP'
+                  ? '시장이 폭등했습니다! 숏 포지션 청산 위험!'
+                  : '시장이 폭락했습니다! 롱 포지션 청산 위험!'}
+              </p>
+            </div>
+            <span className="text-2xl">{flashEvent.type === 'PUMP' ? '🚀' : '💥'}</span>
+          </div>
+          {/* 화면 테두리 번쩍임 효과 */}
+          <div
+            className={`fixed inset-0 pointer-events-none border-4
+              ${flashEvent.type === 'PUMP' ? 'border-[#0ecb81]' : 'border-[#f6465d]'}
+            `}
+            style={{ animation: 'flashBorder 0.5s ease-out 3 alternate' }}
+          />
+        </div>
+      )}
+
+      <style>{`
+        @keyframes flashBanner {
+          0%   { opacity: 1; transform: translateY(0); }
+          80%  { opacity: 1; transform: translateY(0); }
+          100% { opacity: 0; transform: translateY(-20px); }
+        }
+        @keyframes flashBorder {
+          from { opacity: 1; }
+          to   { opacity: 0; }
+        }
+      `}</style>
+
 
       {/* VIP 입장 게이트 */}
       {mounted && isConnected && !hasPaidEntry && address !== owner && (
