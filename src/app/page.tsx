@@ -4,8 +4,25 @@ import { useState, useEffect, useMemo, useRef } from 'react'
 import { useAccount, useConnect, useDisconnect, useReadContract, useWriteContract, useWaitForTransactionReceipt } from 'wagmi'
 import { formatEther, parseEther } from 'viem'
 import { TIPJAR_ABI, TIPJAR_ADDRESS } from '@/config/contract'
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts'
-import { Wallet, LogOut, TrendingUp, TrendingDown, Clock, ArrowRightLeft, Wallet2, BarChart3, Key, ArrowRight } from 'lucide-react'
+import {
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
+  ResponsiveContainer, Cell, ReferenceLine,
+} from 'recharts'
+import { Wallet, LogOut, TrendingUp, TrendingDown, Clock, ArrowRightLeft, Wallet2, BarChart3, Key, ArrowRight, AlertTriangle, Zap } from 'lucide-react'
+
+// ─── 바이낸스 선물 청산가 공식 ──────────────────────────────────────────────────
+// LONG  : liqPrice = entryPrice * (1 - 1/leverage + maintenanceMarginRate)
+// SHORT : liqPrice = entryPrice * (1 + 1/leverage - maintenanceMarginRate)
+// Binance 교차 마진 유지증거금률 ≈ 0.5% (0.005)
+const MAINTENANCE_MARGIN_RATE = 0.005;
+
+function calcLiquidationPrice(entryPrice: number, leverage: number, isLong: boolean): number {
+  if (isLong) {
+    return entryPrice * (1 - 1 / leverage + MAINTENANCE_MARGIN_RATE);
+  } else {
+    return entryPrice * (1 + 1 / leverage - MAINTENANCE_MARGIN_RATE);
+  }
+}
 
 export default function Home() {
   const { address, isConnected } = useAccount()
@@ -16,13 +33,17 @@ export default function Home() {
   const [mounted, setMounted] = useState(false)
   useEffect(() => { setMounted(true) }, [])
 
+  // 청산 플래시 알림 상태
+  const [liquidationAlert, setLiquidationAlert] = useState(false)
+  const liquidatedRef = useRef(false) // 중복 청산 방지
+
   // 1. 캔들 엔진 (전문 거래소 로직)
   const [currentPrice, setCurrentPrice] = useState(0.052450)
   const [candles, setCandles] = useState<any[]>([])
   const tickRef = useRef(0)
-  const trendRef = useRef(0) // 추세(모멘텀) 적용용 상태
+  const trendRef = useRef(0)
   const chartScrollRef = useRef<HTMLDivElement>(null)
-  
+
   const [marginAmount, setMarginAmount] = useState("0.0005")
   const [leverage, setLeverage] = useState<number>(10)
   const [isLongSelection, setIsLongSelection] = useState<boolean>(true)
@@ -35,107 +56,68 @@ export default function Home() {
   }, [candles.length]);
 
   useEffect(() => {
-    // 초기 캔들 생성
     const initialPrice = 0.052450;
     setCandles([{
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-      open: initialPrice, close: initialPrice, high: initialPrice, low: initialPrice, candleRange: [initialPrice, initialPrice]
+      open: initialPrice, close: initialPrice, high: initialPrice, low: initialPrice,
+      candleRange: [initialPrice, initialPrice]
     }]);
 
     const interval = setInterval(() => {
       setCurrentPrice(prev => {
-        // 시장 변동성 로직 (관성 추세 + 기준점 회귀 + 무작위 잔파동)
         const BASE_PRICE = 0.052450;
-        
-        // 1. 관성 (Momentum): 한 방향으로 가려는 힘
         trendRef.current = (trendRef.current * 0.85) + ((Math.random() - 0.5) * 0.0002);
-        
-        // 2. 회귀 본능 (Gravity): 가격이 기준선(0.052450)에서 너무 멀어지면 반대 방향으로 당기는 힘
-        // 이 힘 덕분에 무한정 오르거나 무한정 내리지 않고 양봉/음봉이 번갈아 나옵니다.
-        const gravity = (BASE_PRICE - prev) * 0.02; 
-        
-        // 3. 노이즈 (Noise): 1초마다 발생하여 꼬리를 형성하는 무작위 잔파동
+        const gravity = (BASE_PRICE - prev) * 0.02;
         const noise = (Math.random() - 0.5) * 0.0001;
-        
         const change = trendRef.current + gravity + noise;
         const newPrice = Math.max(0.01, prev + change);
-        
+
         tickRef.current += 1;
         const isNewCandle = tickRef.current % 5 === 0;
         const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
         setCandles(prevCandles => {
           if (prevCandles.length === 0) return prevCandles;
-          
           const list = [...prevCandles];
           const last = { ...list[list.length - 1] };
-          
-          // 실시간 변동 적용
           last.close = newPrice;
           last.high = Math.max(last.high, newPrice);
           last.low = Math.min(last.low, newPrice);
           last.candleRange = [last.low, last.high];
           list[list.length - 1] = last;
-
           if (isNewCandle) {
-            // 다음 봉 시작: 시가는 무조건 전 봉의 종가와 동일 (연속성)
             list.push({
               time: now,
-              open: last.close,
-              close: last.close,
-              high: last.close,
-              low: last.close,
+              open: last.close, close: last.close,
+              high: last.close, low: last.close,
               candleRange: [last.close, last.close]
             });
           }
-          return list; // 제한 없이 무한으로 스택 쌓음
+          return list;
         });
-        
         return newPrice;
       });
     }, 1000);
     return () => clearInterval(interval);
   }, []);
 
-  // 고정밀 캔들 렌더러 (Bounding Box 기반 안전 렌더링)
+  // 고정밀 캔들 렌더러
   const Candle = (props: any) => {
     const { x, y, width, height, open, close, high, low, candleRange } = props;
     if (!candleRange) return null;
-    
     const isUp = close >= open;
     const color = isUp ? '#0ecb81' : '#f6465d';
-
-    // y는 항상 고가(High)의 최상단 화면 좌표이며, height는 전체 꼬리의 총 길이입니다.
     const priceRange = high - low;
     const pixelPerPrice = priceRange > 0 ? height / priceRange : 0;
-    
-    // 시가와 종가의 Y 화면 좌표 계산
     const openY = y + (high - open) * pixelPerPrice;
     const closeY = y + (high - close) * pixelPerPrice;
-    
     const bodyTop = Math.min(openY, closeY);
     const bodyBottom = Math.max(openY, closeY);
-    const bodyHeight = Math.max(bodyBottom - bodyTop, 1); // 캔들 몸통 최소 1px 보장
-
+    const bodyHeight = Math.max(bodyBottom - bodyTop, 1);
     return (
       <g>
-        {/* 심지 (Wick) - Bar의 전체 영역(y ~ y + height) 1px 선 */}
-        <line 
-          x1={x + width / 2} 
-          y1={y} 
-          x2={x + width / 2} 
-          y2={y + height} 
-          stroke={color} 
-          strokeWidth={1} 
-        />
-        {/* 몸통 (Body) - 계산된 실제 종가/시가 좌표 기준 */}
-        <rect 
-          x={x + 2} 
-          y={bodyTop} 
-          width={Math.max(width - 4, 1)} 
-          height={bodyHeight} 
-          fill={color} 
-        />
+        <line x1={x + width / 2} y1={y} x2={x + width / 2} y2={y + height} stroke={color} strokeWidth={1} />
+        <rect x={x + 2} y={bodyTop} width={Math.max(width - 4, 1)} height={bodyHeight} fill={color} />
       </g>
     );
   };
@@ -153,7 +135,8 @@ export default function Home() {
     query: { enabled: !!address }
   })
   const { data: positionData, refetch: refetchPosition } = useReadContract({
-    address: TIPJAR_ADDRESS, abi: TIPJAR_ABI, functionName: 'userPositions', args: [address as `0x${string}`],
+    address: TIPJAR_ADDRESS, abi: TIPJAR_ABI, functionName: 'userPositions',
+    args: [address as `0x${string}`],
     query: { enabled: !!address }
   })
   const { data: tradeHistory, refetch: refetchHistory } = useReadContract({
@@ -167,30 +150,47 @@ export default function Home() {
     if (!isOpen) return null;
     return {
       margin: Number(formatEther(margin)),
-      entryPrice: Number(entryPrice) / 1e8, // 1e8로 나누어 소수점 복원
-      leverage: Number(leverageValue || 1), // 배율 파싱
+      entryPrice: Number(entryPrice) / 1e8,
+      leverage: Number(leverageValue || 1),
       isLong: Boolean(isLongBool !== undefined ? isLongBool : true),
       timestamp: Number(timestamp)
     };
-  }, [positionData]);
+  }, [positionData])
 
-  // 실시간 예상 수익 계산 (방향성 적용)
-  const currentPnL = useMemo(() => {
-    if (!activePosition) return 0;
-    const isUp = currentPrice >= activePosition.entryPrice;
-    const isProfit = activePosition.isLong ? isUp : !isUp;
-    const diff = isUp ? currentPrice - activePosition.entryPrice : activePosition.entryPrice - currentPrice;
-    const rawPnL = (activePosition.margin * activePosition.leverage * diff) / activePosition.entryPrice;
+  // ── 청산가 계산 ─────────────────────────────────────────────────────────────
+  const liquidationPrice = useMemo(() => {
+    if (!activePosition) return null;
+    return calcLiquidationPrice(activePosition.entryPrice, activePosition.leverage, activePosition.isLong);
+  }, [activePosition])
 
-    if (isProfit) {
-      // 30% 기본 수수료 + 레버리지 비례 할증 (100배 = 50%)
+  // ── 청산가 미리보기 (포지션 오픈 전) ──────────────────────────────────────────
+  const previewLiquidationPrice = useMemo(() => {
+    return calcLiquidationPrice(currentPrice, leverage, isLongSelection);
+  }, [currentPrice, leverage, isLongSelection])
+
+  // ── 실시간 PnL 계산 (바이낸스 방식) ─────────────────────────────────────────
+  // rawPnL: 수수료 제외 순수 손익 (Gross PnL)
+  // fee: 수익이 났을 때만 부과되는 수수료
+  // netPnL: 수수료 차감 후 실수령 손익 (Net PnL)
+  const pnlData = useMemo(() => {
+    if (!activePosition) return { rawPnL: 0, fee: 0, netPnL: 0, isProfit: false };
+
+    const priceDiff = currentPrice - activePosition.entryPrice;
+    const directedDiff = activePosition.isLong ? priceDiff : -priceDiff;
+    const rawPnL = (activePosition.margin * activePosition.leverage * directedDiff) / activePosition.entryPrice;
+
+    if (rawPnL >= 0) {
+      // 수익 시: 수수료 = 순수익 * feeRate%
       const feeRate = 30 + Math.floor(((activePosition.leverage - 1) * 20) / 99);
-      return rawPnL * ((100 - feeRate) / 100); 
+      const fee = rawPnL * (feeRate / 100);
+      const netPnL = rawPnL - fee;
+      return { rawPnL, fee, netPnL, isProfit: true, feeRate };
     } else {
-      if (rawPnL >= activePosition.margin) return -activePosition.margin; // 100% 손실 시 원금 청산
-      return -rawPnL;
+      // 손실 시: 청산 시 원금 초과 손실 방지
+      const lossAbs = Math.min(Math.abs(rawPnL), activePosition.margin);
+      return { rawPnL: -lossAbs, fee: 0, netPnL: -lossAbs, isProfit: false, feeRate: 0 };
     }
-  }, [activePosition, currentPrice]);
+  }, [activePosition, currentPrice])
 
   const pnlPercent = useMemo(() => {
     if (!activePosition) return 0;
@@ -198,11 +198,37 @@ export default function Home() {
     const actualDiff = activePosition.isLong ? diffPercent : -diffPercent;
     const leveragedPercent = actualDiff * 100 * activePosition.leverage;
     return leveragedPercent <= -100 ? -100 : leveragedPercent;
-  }, [activePosition, currentPrice]);
+  }, [activePosition, currentPrice])
 
-  // 3. 트랜잭션 처리
+  // ── 청산 감지 (자동 프론트엔드 강제 청산) ────────────────────────────────────
   const { data: hash, isPending, writeContract } = useWriteContract()
   const { isLoading: isConfirming, isSuccess: isConfirmed } = useWaitForTransactionReceipt({ hash })
+
+  useEffect(() => {
+    if (!activePosition || !liquidationPrice || liquidatedRef.current) return;
+
+    const isLiquidated = activePosition.isLong
+      ? currentPrice <= liquidationPrice
+      : currentPrice >= liquidationPrice;
+
+    if (isLiquidated) {
+      liquidatedRef.current = true;
+      setLiquidationAlert(true);
+      // 자동으로 청산 트랜잭션 제출
+      writeContract({
+        address: TIPJAR_ADDRESS, abi: TIPJAR_ABI, functionName: 'closePosition',
+        args: [BigInt(Math.floor(currentPrice * 1e8))]
+      });
+      setTimeout(() => setLiquidationAlert(false), 5000);
+    }
+  }, [currentPrice, activePosition, liquidationPrice]);
+
+  // 포지션이 닫히면 청산 플래그 초기화
+  useEffect(() => {
+    if (!activePosition) {
+      liquidatedRef.current = false;
+    }
+  }, [activePosition]);
 
   const handleOpenPosition = () => {
     if (!hasPaidEntry && address !== owner) {
@@ -215,7 +241,7 @@ export default function Home() {
     }
     writeContract({
       address: TIPJAR_ADDRESS, abi: TIPJAR_ABI, functionName: 'openPosition',
-      args: [BigInt(Math.floor(currentPrice * 1e8)), BigInt(leverage), isLongSelection], // 방향(isLong) 전달
+      args: [BigInt(Math.floor(currentPrice * 1e8)), BigInt(leverage), isLongSelection],
       value: parseEther(marginAmount)
     })
   }
@@ -253,9 +279,37 @@ export default function Home() {
     }
   }, [isConfirmed]);
 
+  // 차트 Y축 도메인: 청산가를 포함하도록 확장
+  const chartDomain = useMemo(() => {
+    if (candles.length === 0) return ['auto', 'auto'] as const;
+    const allPrices = candles.flatMap((c: any) => [c.high, c.low]);
+    let minP = Math.min(...allPrices);
+    let maxP = Math.max(...allPrices);
+    if (liquidationPrice) {
+      minP = Math.min(minP, liquidationPrice * 0.999);
+      maxP = Math.max(maxP, liquidationPrice * 1.001);
+    }
+    const padding = (maxP - minP) * 0.1;
+    return [minP - padding, maxP + padding] as [number, number];
+  }, [candles, liquidationPrice]);
+
   return (
     <div className="min-h-screen bg-[#0b0e11] text-[#eaecef] font-sans selection:bg-[#fcd535]/30 relative">
-      {/* VIP 입장 게이트 (입장료 미지불 시) */}
+
+      {/* ── 청산 플래시 알림 ─────────────────────────────────────────────────── */}
+      {liquidationAlert && (
+        <div className="fixed top-20 left-1/2 -translate-x-1/2 z-[200] animate-bounce">
+          <div className="bg-[#f6465d] text-white px-6 py-4 rounded-xl shadow-2xl shadow-[#f6465d]/40 flex items-center gap-3 border border-[#ff7a8a]">
+            <AlertTriangle className="w-6 h-6 animate-pulse" />
+            <div>
+              <p className="font-black text-lg">⚡ 강제 청산 발생!</p>
+              <p className="text-sm opacity-90">청산가 도달 — 포지션이 자동으로 종료되었습니다.</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* VIP 입장 게이트 */}
       {mounted && isConnected && !hasPaidEntry && address !== owner && (
         <div className="fixed inset-0 z-[100] bg-[#0b0e11]/80 backdrop-blur-md flex items-center justify-center p-4">
           <div className="bg-[#1e2329] p-8 rounded-2xl border border-[#fcd535]/30 shadow-2xl shadow-[#fcd535]/5 max-w-md w-full text-center space-y-6">
@@ -264,11 +318,11 @@ export default function Home() {
             </div>
             <h2 className="text-2xl font-black text-white">VIP 전용 거래소 입장</h2>
             <p className="text-[#848e9c] text-sm leading-relaxed">
-              본 거래소는 엄선된 파트너만 이용 가능합니다.<br/> 
-              <span className="text-white font-bold">1회성 입장료 0.01 ETH</span>를 지불하고<br/>
+              본 거래소는 엄선된 파트너만 이용 가능합니다.<br />
+              <span className="text-white font-bold">1회성 입장료 0.01 ETH</span>를 지불하고<br />
               실시간 마진 거래를 시작하세요!
             </p>
-            <button 
+            <button
               onClick={handlePayEntryFee}
               className="w-full bg-[#fcd535] hover:bg-[#f2c94c] text-black font-black py-4 rounded-xl transition-all transform hover:scale-[1.02] flex items-center justify-center gap-2"
             >
@@ -295,7 +349,6 @@ export default function Home() {
             <span className="hover:text-white cursor-pointer transition-colors">리더보드</span>
           </div>
         </div>
-
         <div className="flex items-center gap-4">
           <div className="hidden sm:flex flex-col items-end">
             <span className="text-[10px] text-[#848e9c] font-bold">EXCHANGE POOL</span>
@@ -331,6 +384,18 @@ export default function Home() {
                       {currentPrice >= 0.052450 ? '▲' : '▼'} {Math.abs(((currentPrice - 0.052450) / 0.052450) * 100).toFixed(2)}%
                     </span>
                   </div>
+                  {/* 청산가 뱃지 - 포지션 보유 중일 때 헤더에도 표시 */}
+                  {activePosition && liquidationPrice && (
+                    <div className="flex items-center gap-2 mt-1">
+                      <span className="text-[10px] font-bold text-[#f6465d] bg-[#f6465d]/10 px-2 py-0.5 rounded border border-[#f6465d]/30 flex items-center gap-1">
+                        <Zap className="w-3 h-3" />
+                        청산가: {liquidationPrice.toFixed(6)} ETH
+                      </span>
+                      <span className="text-[10px] text-[#848e9c]">
+                        ({((Math.abs(currentPrice - liquidationPrice) / currentPrice) * 100).toFixed(2)}% 거리)
+                      </span>
+                    </div>
+                  )}
                 </div>
               </div>
               <div className="flex gap-2">
@@ -339,53 +404,73 @@ export default function Home() {
                 ))}
               </div>
             </div>
-            
-            {/* 가로 스크롤 컨테이너: 캔들이 늘어나면 width가 동적으로 길어집니다. */}
-            <div 
-              ref={chartScrollRef} 
+
+            {/* 가로 스크롤 차트 */}
+            <div
+              ref={chartScrollRef}
               style={{ height: '400px', width: '100%', overflowX: 'auto', overflowY: 'hidden' }}
               className="css-scrollbar"
             >
               <div style={{ height: '100%', minWidth: '100%', width: `${Math.max(100, (candles.length / 40) * 100)}%` }}>
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={candles} margin={{ top: 20, right: 30, left: 0, bottom: 5 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#2b3139" vertical={false} opacity={0.3} />
-                  <XAxis 
-                    dataKey="time" 
-                    stroke="#5e6673" 
-                    fontSize={10} 
-                    tickLine={false} 
-                    axisLine={false}
-                    minTickGap={30}
-                  />
-                  <YAxis 
-                    domain={['auto', 'auto']} 
-                    stroke="#5e6673" 
-                    fontSize={10} 
-                    tickLine={false} 
-                    axisLine={false}
-                    orientation="right"
-                    tickFormatter={(val) => val.toFixed(5)}
-                  />
-                  <Tooltip 
-                    contentStyle={{ backgroundColor: '#1e2329', border: '1px solid #2b3139', borderRadius: '8px', fontSize: '12px' }}
-                    cursor={{ fill: 'rgba(255,255,255,0.05)' }}
-                    labelStyle={{ color: '#848e9c', marginBottom: '4px' }}
-                  />
-                  <Bar 
-                    dataKey="candleRange" 
-                    shape={<Candle />}
-                    animationDuration={0}
-                    isAnimationActive={false}
-                  >
-                    {candles.map((entry, index) => (
-                      <Cell key={`cell-${index}`} fill={entry.close >= entry.open ? '#0ecb81' : '#f6465d'} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#2b3139" vertical={false} opacity={0.3} />
+                    <XAxis dataKey="time" stroke="#5e6673" fontSize={10} tickLine={false} axisLine={false} minTickGap={30} />
+                    <YAxis
+                      domain={chartDomain}
+                      stroke="#5e6673" fontSize={10} tickLine={false} axisLine={false}
+                      orientation="right"
+                      tickFormatter={(val) => val.toFixed(5)}
+                    />
+                    <Tooltip
+                      contentStyle={{ backgroundColor: '#1e2329', border: '1px solid #2b3139', borderRadius: '8px', fontSize: '12px' }}
+                      cursor={{ fill: 'rgba(255,255,255,0.05)' }}
+                      labelStyle={{ color: '#848e9c', marginBottom: '4px' }}
+                    />
+
+                    {/* ── 청산가 수평선 ── */}
+                    {activePosition && liquidationPrice && (
+                      <ReferenceLine
+                        y={liquidationPrice}
+                        stroke="#f6465d"
+                        strokeDasharray="6 3"
+                        strokeWidth={1.5}
+                        label={{
+                          value: `⚡ 청산가 ${liquidationPrice.toFixed(5)}`,
+                          position: 'insideTopLeft',
+                          fill: '#f6465d',
+                          fontSize: 10,
+                          fontWeight: 700,
+                        }}
+                      />
+                    )}
+
+                    {/* ── 진입가 수평선 ── */}
+                    {activePosition && (
+                      <ReferenceLine
+                        y={activePosition.entryPrice}
+                        stroke={activePosition.isLong ? '#0ecb81' : '#f6465d'}
+                        strokeDasharray="4 4"
+                        strokeWidth={1}
+                        label={{
+                          value: `진입가 ${activePosition.entryPrice.toFixed(5)}`,
+                          position: 'insideBottomLeft',
+                          fill: activePosition.isLong ? '#0ecb81' : '#f6465d',
+                          fontSize: 10,
+                          fontWeight: 600,
+                        }}
+                      />
+                    )}
+
+                    <Bar dataKey="candleRange" shape={<Candle />} animationDuration={0} isAnimationActive={false}>
+                      {candles.map((entry, index) => (
+                        <Cell key={`cell-${index}`} fill={entry.close >= entry.open ? '#0ecb81' : '#f6465d'} />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
             </div>
-          </div>
           </div>
 
           {/* Trade History Table */}
@@ -399,38 +484,76 @@ export default function Home() {
               <table className="w-full text-left text-sm">
                 <thead>
                   <tr className="text-[#848e9c] text-[11px] uppercase border-b border-[#2b3139]">
-                    <th className="px-6 py-3 font-bold">주소</th>
-                    <th className="px-6 py-3 font-bold">투자금(ETH)</th>
-                    <th className="px-6 py-3 font-bold">진입/종료가</th>
-                    <th className="px-6 py-3 font-bold">수수료(ETH)</th>
-                    <th className="px-6 py-3 font-bold text-right">손익(PnL) & 수익률</th>
+                    <th className="px-4 py-3 font-bold">주소</th>
+                    <th className="px-4 py-3 font-bold">투자금 / 방향</th>
+                    <th className="px-4 py-3 font-bold">진입가</th>
+                    {/* ── 분리된 컬럼 ── */}
+                    <th className="px-4 py-3 font-bold text-center">총손익 (Gross)</th>
+                    <th className="px-4 py-3 font-bold text-center text-[#fcd535]">수수료</th>
+                    <th className="px-4 py-3 font-bold text-right">실수령 (Net)</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#2b3139]">
                   {tradeHistory && (tradeHistory as any[]).map((h, i) => {
                     const marginNum = Number(formatEther(h.margin));
-                    const pnlNum = Number(formatEther(h.pnl));
+                    const pnlNum = Number(formatEther(h.pnl));     // 컨트랙트 저장값 = Net PnL
                     const leverageUsed = Number(h.leverage || 100);
                     const isLongRecord = h.isLong !== undefined ? h.isLong : true;
-                    const feeRate = BigInt(30 + Math.floor((leverageUsed - 1) * 20 / 99));
-                    // 수수료 = 순수익 * feeRate / (100 - feeRate)
-                    const feeEth = h.isProfit ? formatEther((h.pnl * feeRate) / (100n - feeRate)) : "0";
-                    const roi = (pnlNum / marginNum) * 100 * (h.isProfit ? 1 : -1);
+                    const feeRateNum = 30 + Math.floor((leverageUsed - 1) * 20 / 99);
+
+                    // Gross PnL 역산: netPnL = grossPnL * (1 - feeRate/100)
+                    // => grossPnL = netPnL / (1 - feeRate/100)
+                    const grossPnL = h.isProfit ? pnlNum / (1 - feeRateNum / 100) : -pnlNum;
+                    const feeEth = h.isProfit ? grossPnL * (feeRateNum / 100) : 0;
+                    const netPnL = h.isProfit ? pnlNum : -pnlNum;
+                    const roi = (Math.abs(netPnL) / marginNum) * 100 * (h.isProfit ? 1 : -1);
+                    const grossRoi = (Math.abs(grossPnL) / marginNum) * 100 * (h.isProfit ? 1 : -1);
 
                     return (
                       <tr key={i} className="hover:bg-[#2b3139]/30 transition-colors">
-                        <td className="px-6 py-4 font-mono text-[#848e9c]">{h.user.slice(0, 6)}...{h.user.slice(-4)}</td>
-                        <td className="px-6 py-4 font-bold text-white">{formatEther(h.margin)}</td>
-                        <td className="px-6 py-4">
-                          <span className="block text-white">진입: {(Number(h.entryPrice) / 1e8).toFixed(6)}</span>
-                          <span className="block text-[10px] flex items-center gap-1 font-bold">
-                            <span className={isLongRecord ? 'text-[#0ecb81]' : 'text-[#f6465d]'}>{isLongRecord ? 'LONG' : 'SHORT'}</span>
-                            <span className="text-[#848e9c]">배율: {leverageUsed}X</span>
+                        <td className="px-4 py-4 font-mono text-[#848e9c] text-xs">{h.user.slice(0, 6)}...{h.user.slice(-4)}</td>
+
+                        <td className="px-4 py-4">
+                          <span className="block font-bold text-white text-xs">{marginNum.toFixed(5)} ETH</span>
+                          <div className="flex items-center gap-1 mt-0.5">
+                            <span className={`text-[10px] font-black px-1.5 py-0.5 rounded ${isLongRecord ? 'bg-[#0ecb81]/20 text-[#0ecb81]' : 'bg-[#f6465d]/20 text-[#f6465d]'}`}>
+                              {isLongRecord ? 'LONG' : 'SHORT'}
+                            </span>
+                            <span className="text-[10px] text-[#848e9c]">{leverageUsed}X</span>
+                          </div>
+                        </td>
+
+                        <td className="px-4 py-4 font-mono text-xs text-white">
+                          {(Number(h.entryPrice) / 1e8).toFixed(6)}
+                        </td>
+
+                        {/* Gross PnL */}
+                        <td className={`px-4 py-4 text-center ${h.isProfit ? 'text-[#0ecb81]' : 'text-[#f6465d]'}`}>
+                          <span className="block font-bold text-xs">
+                            {grossPnL >= 0 ? '+' : ''}{grossPnL.toFixed(6)} ETH
+                          </span>
+                          <span className={`text-[10px] px-1 py-0.5 rounded font-black ${h.isProfit ? 'bg-[#0ecb81]/10' : 'bg-[#f6465d]/10'}`}>
+                            {grossRoi > 0 ? '+' : ''}{grossRoi.toFixed(2)}%
                           </span>
                         </td>
-                        <td className="px-6 py-4 text-[#fcd535] text-xs font-mono">{Number(feeEth).toFixed(6)}</td>
-                        <td className={`px-6 py-4 text-right flex flex-col items-end justify-center gap-1 ${h.isProfit ? 'text-[#0ecb81]' : 'text-[#f6465d]'}`}>
-                          <span className="font-bold text-sm">{h.isProfit ? '+' : '-'}{Number(formatEther(h.pnl)).toFixed(6)} ETH</span>
+
+                        {/* 수수료 */}
+                        <td className="px-4 py-4 text-center">
+                          {h.isProfit ? (
+                            <div>
+                              <span className="block text-[#fcd535] font-mono font-bold text-xs">-{feeEth.toFixed(6)} ETH</span>
+                              <span className="text-[10px] text-[#848e9c]">{feeRateNum}% 징수</span>
+                            </div>
+                          ) : (
+                            <span className="text-[10px] text-[#474d57]">해당없음</span>
+                          )}
+                        </td>
+
+                        {/* Net PnL */}
+                        <td className={`px-4 py-4 text-right ${h.isProfit ? 'text-[#0ecb81]' : 'text-[#f6465d]'}`}>
+                          <span className="block font-bold text-sm">
+                            {netPnL >= 0 ? '+' : ''}{netPnL.toFixed(6)} ETH
+                          </span>
                           <span className={`text-[10px] px-1.5 py-0.5 rounded font-black ${h.isProfit ? 'bg-[#0ecb81]/20' : 'bg-[#f6465d]/20'}`}>
                             {roi > 0 ? '+' : ''}{roi.toFixed(2)}%
                           </span>
@@ -439,7 +562,7 @@ export default function Home() {
                     );
                   })}
                   {(!tradeHistory || (tradeHistory as any[]).length === 0) && (
-                    <tr><td colSpan={5} className="px-6 py-12 text-center text-[#474d57]">거래 내역이 없습니다. 첫 번째 포지션을 오픈해 보세요!</td></tr>
+                    <tr><td colSpan={6} className="px-6 py-12 text-center text-[#474d57]">거래 내역이 없습니다. 첫 번째 포지션을 오픈해 보세요!</td></tr>
                   )}
                 </tbody>
               </table>
@@ -454,37 +577,97 @@ export default function Home() {
             <span className={`text-[10px] font-black uppercase tracking-tighter ${activePosition ? (activePosition.isLong ? 'text-[#0ecb81]' : 'text-[#f6465d]') : 'text-[#fcd535]'}`}>
               MY ACTIVE POSITION {activePosition && (activePosition.isLong ? '(LONG)' : '(SHORT)')}
             </span>
+
             {activePosition ? (
-              <div className="mt-4 space-y-4">
+              <div className="mt-4 space-y-3">
+                {/* 수익률 + Net PnL */}
                 <div className="flex justify-between items-baseline">
                   <div className="flex flex-col">
-                    <span className="text-3xl font-black text-white font-mono">
+                    <span className={`text-3xl font-black font-mono ${pnlPercent >= 0 ? 'text-[#0ecb81]' : 'text-[#f6465d]'}`}>
                       {pnlPercent >= 0 ? '+' : ''}{pnlPercent.toFixed(2)}%
                     </span>
-                    <span className="text-xs text-[#848e9c]">실시간 예상 수익율</span>
+                    <span className="text-xs text-[#848e9c]">실시간 수익률</span>
                   </div>
                   <div className="text-right">
-                    <span className={`text-lg font-bold font-mono ${currentPnL >= 0 ? 'text-[#0ecb81]' : 'text-[#f6465d]'}`}>
-                      {currentPnL >= 0 ? '+' : ''}{currentPnL.toFixed(6)} ETH
+                    <span className={`text-lg font-bold font-mono ${pnlData.netPnL >= 0 ? 'text-[#0ecb81]' : 'text-[#f6465d]'}`}>
+                      {pnlData.netPnL >= 0 ? '+' : ''}{pnlData.netPnL.toFixed(6)} ETH
                     </span>
-                    <p className="text-[10px] text-[#848e9c]">PnL (예상 순수익)</p>
+                    <p className="text-[10px] text-[#848e9c]">Net PnL (수수료 후)</p>
                   </div>
                 </div>
-                <div className="bg-[#2b3139]/50 p-2 rounded text-[9px] text-[#848e9c] flex justify-between">
-                  <span>변동 수수료율</span>
-                  <span className="text-[#fcd535]">수익금의 {30 + Math.floor(((activePosition.leverage - 1) * 20) / 99)}% 징수</span>
+
+                {/* PnL 상세 분해 */}
+                <div className="bg-[#0b0e11] rounded-lg p-3 space-y-1.5">
+                  <div className="flex justify-between text-xs">
+                    <span className="text-[#848e9c]">총 손익 (Gross PnL)</span>
+                    <span className={`font-bold font-mono ${pnlData.rawPnL >= 0 ? 'text-[#0ecb81]' : 'text-[#f6465d]'}`}>
+                      {pnlData.rawPnL >= 0 ? '+' : ''}{pnlData.rawPnL.toFixed(6)} ETH
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-xs">
+                    <span className="text-[#848e9c]">수수료 ({pnlData.feeRate ?? 0}%)</span>
+                    <span className="text-[#fcd535] font-mono">
+                      {pnlData.fee > 0 ? `-${pnlData.fee.toFixed(6)}` : '0.000000'} ETH
+                    </span>
+                  </div>
+                  <div className="border-t border-[#2b3139] pt-1.5 flex justify-between text-xs">
+                    <span className="text-white font-bold">실수령 (Net PnL)</span>
+                    <span className={`font-black font-mono ${pnlData.netPnL >= 0 ? 'text-[#0ecb81]' : 'text-[#f6465d]'}`}>
+                      {pnlData.netPnL >= 0 ? '+' : ''}{pnlData.netPnL.toFixed(6)} ETH
+                    </span>
+                  </div>
                 </div>
-                <div className="grid grid-cols-2 gap-4 pt-2 border-t border-[#2b3139]">
+
+                {/* ─ 청산가 위험 게이지 ─ */}
+                {liquidationPrice && (
+                  <div className="bg-[#1a0a0c] border border-[#f6465d]/30 rounded-lg p-3">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-[10px] text-[#f6465d] font-black flex items-center gap-1">
+                        <Zap className="w-3 h-3" /> 강제 청산가
+                      </span>
+                      <span className="text-xs font-bold font-mono text-[#f6465d]">{liquidationPrice.toFixed(6)} ETH</span>
+                    </div>
+                    {/* 현재가와 청산가 사이 거리 게이지 */}
+                    {(() => {
+                      const dist = Math.abs(currentPrice - liquidationPrice);
+                      const distPct = (dist / currentPrice) * 100;
+                      const danger = Math.max(0, Math.min(100, 100 - distPct * 10));
+                      const barColor = danger > 70 ? '#f6465d' : danger > 40 ? '#fcd535' : '#0ecb81';
+                      return (
+                        <div>
+                          <div className="w-full bg-[#2b3139] rounded-full h-1.5 mb-1">
+                            <div
+                              className="h-1.5 rounded-full transition-all duration-500"
+                              style={{ width: `${danger}%`, backgroundColor: barColor }}
+                            />
+                          </div>
+                          <div className="flex justify-between text-[9px] text-[#848e9c]">
+                            <span>청산까지 {distPct.toFixed(2)}% 남음</span>
+                            <span style={{ color: barColor }} className="font-bold">
+                              {danger > 70 ? '⚠️ 매우 위험' : danger > 40 ? '주의 요망' : '안전'}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
+
+                {/* 포지션 정보 그리드 */}
+                <div className="grid grid-cols-2 gap-3 pt-2 border-t border-[#2b3139]">
                   <div>
                     <p className="text-[10px] text-[#848e9c]">투자 원금</p>
-                    <p className="text-sm font-bold text-white font-mono">{activePosition.margin.toFixed(4)} <span className="text-[#fcd535] text-[10px]">({activePosition.leverage}X)</span></p>
+                    <p className="text-sm font-bold text-white font-mono">
+                      {activePosition.margin.toFixed(5)} <span className="text-[#fcd535] text-[10px]">({activePosition.leverage}X)</span>
+                    </p>
                   </div>
                   <div className="text-right">
-                    <p className="text-[10px] text-[#848e9c]">진입 가격</p>
-                    <p className="text-sm font-bold text-white font-mono">{activePosition.entryPrice.toFixed(6)} ETH</p>
+                    <p className="text-[10px] text-[#848e9c]">진입가</p>
+                    <p className="text-sm font-bold text-white font-mono">{activePosition.entryPrice.toFixed(6)}</p>
                   </div>
                 </div>
-                <button 
+
+                <button
                   onClick={handleClosePosition} disabled={isPending || isConfirming}
                   className="w-full bg-[#f6465d] hover:bg-[#ff5b6f] text-white py-3 rounded-lg font-bold shadow-lg shadow-[#f6465d]/20 transition-all flex items-center justify-center gap-2"
                 >
@@ -506,67 +689,70 @@ export default function Home() {
           {!activePosition && (
             <div className="bg-[#181a20] rounded-xl border border-[#2b3139] overflow-hidden shadow-sm">
               <div className="grid grid-cols-2">
-                <button 
+                <button
                   onClick={() => setIsLongSelection(true)}
                   className={`py-3 text-sm font-bold transition-colors ${isLongSelection ? 'bg-[#2b3139] text-[#0ecb81] border-b-2 border-b-[#0ecb81]' : 'text-[#848e9c]'}`}
                 >롱 (상승베팅)</button>
-                <button 
+                <button
                   onClick={() => setIsLongSelection(false)}
                   className={`py-3 text-sm font-bold transition-colors ${!isLongSelection ? 'bg-[#2b3139] text-[#f6465d] border-b-2 border-b-[#f6465d]' : 'text-[#848e9c]'}`}
                 >숏 (하락베팅)</button>
               </div>
-              <div className="p-6 space-y-6">
+              <div className="p-6 space-y-5">
                 <div className="space-y-2">
                   <div className="flex justify-between items-center">
                     <span className="text-xs text-[#848e9c] font-bold">투자 수량(Margin)</span>
                     <span className="text-[10px] text-[#474d57]">최소 0.00001 / 최대 0.001</span>
                   </div>
-                  <div className="bg-[#2b3139] p-3 rounded-lg flex justify-between items-center group border border-transparent focus-within:border-[#fcd535] transition-all">
-                   <div className="flex items-center gap-2">
-                     <Wallet2 className="w-4 h-4 text-[#848e9c]" />
-                     <input 
-                       type="number" step="0.00001" value={marginAmount} onChange={e => setMarginAmount(e.target.value)}
-                       className="bg-transparent text-sm font-bold text-white outline-none w-full"
-                       placeholder="0.00"
-                     />
-                   </div>
-                   <span className="text-xs font-bold text-[#fcd535]">ETH</span>
+                  <div className="bg-[#2b3139] p-3 rounded-lg flex justify-between items-center border border-transparent focus-within:border-[#fcd535] transition-all">
+                    <div className="flex items-center gap-2">
+                      <Wallet2 className="w-4 h-4 text-[#848e9c]" />
+                      <input
+                        type="number" step="0.00001" value={marginAmount} onChange={e => setMarginAmount(e.target.value)}
+                        className="bg-transparent text-sm font-bold text-white outline-none w-full"
+                        placeholder="0.00"
+                      />
+                    </div>
+                    <span className="text-xs font-bold text-[#fcd535]">ETH</span>
                   </div>
                 </div>
 
-                <div className="space-y-2 mt-4">
+                <div className="space-y-2">
                   <div className="flex justify-between items-center">
                     <span className="text-xs text-[#848e9c] font-bold">레버리지 조절</span>
                     <span className="text-[10px] text-[#fcd535]">{leverage}X</span>
                   </div>
                   <div className="flex gap-2">
                     {[1, 10, 50, 100].map(val => (
-                      <button 
-                        key={val} 
-                        onClick={() => setLeverage(val)}
-                        className={`flex-1 py-1 text-xs font-bold rounded transiton-all ${leverage === val ? 'bg-[#fcd535] text-black shadow-lg shadow-[#fcd535]/30' : 'bg-[#2b3139] text-[#848e9c] hover:bg-[#2b3139]/80'}`}
-                      >
-                        {val}X
-                      </button>
+                      <button
+                        key={val} onClick={() => setLeverage(val)}
+                        className={`flex-1 py-1 text-xs font-bold rounded transition-all ${leverage === val ? 'bg-[#fcd535] text-black shadow-lg shadow-[#fcd535]/30' : 'bg-[#2b3139] text-[#848e9c] hover:bg-[#2b3139]/80'}`}
+                      >{val}X</button>
                     ))}
                   </div>
                   <p className="text-[9px] text-right text-[#848e9c]">수익 수수료율: <span className="text-[#f6465d]">{30 + Math.floor(((leverage - 1) * 20) / 99)}%</span> 적용</p>
                 </div>
 
-                <div className="bg-[#2b3139]/50 p-4 rounded-lg space-y-2">
+                {/* 포지션 미리보기 */}
+                <div className="bg-[#0b0e11] p-3 rounded-lg space-y-1.5">
                   <div className="flex justify-between text-xs">
-                    <span className="text-[#848e9c]">진입가 (시뮬레이션)</span>
-                    <span className="text-white font-mono text-[10px]">{currentPrice.toFixed(8)} ETH</span>
+                    <span className="text-[#848e9c]">진입가 예상</span>
+                    <span className="text-white font-mono">{currentPrice.toFixed(6)} ETH</span>
                   </div>
                   <div className="flex justify-between text-xs">
-                    <span className="text-[#848e9c]">청산 예상 위험도</span>
-                    <span className={`${leverage >= 50 ? 'text-[#f6465d]' : leverage >= 10 ? 'text-[#fcd535]' : 'text-[#0ecb81]'} font-bold`}>
-                      {leverage >= 50 ? '매우 높음 (수시 청산)' : leverage >= 10 ? '중간 (시장가 주의)' : '낮음 (현물 위주)'}
+                    <span className="text-[#848e9c]">예상 청산가</span>
+                    <span className="text-[#f6465d] font-mono font-bold">{previewLiquidationPrice.toFixed(6)} ETH</span>
+                  </div>
+                  <div className="flex justify-between text-xs">
+                    <span className="text-[#848e9c]">청산까지 거리</span>
+                    <span className={`font-bold ${leverage >= 50 ? 'text-[#f6465d]' : leverage >= 10 ? 'text-[#fcd535]' : 'text-[#0ecb81]'}`}>
+                      {((Math.abs(currentPrice - previewLiquidationPrice) / currentPrice) * 100).toFixed(2)}%&nbsp;
+                      ({leverage >= 50 ? '매우 위험' : leverage >= 10 ? '중간' : '안전'})
                     </span>
                   </div>
                 </div>
 
-                <button 
+                <button
                   onClick={handleOpenPosition}
                   disabled={!mounted || isPending || isConfirming || !isConnected}
                   className={`w-full text-white font-black py-4 rounded-xl transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed ${isLongSelection ? 'bg-[#0ecb81] hover:bg-[#12e391] shadow-lg shadow-[#0ecb81]/10' : 'bg-[#f6465d] hover:bg-[#ff5b6f] shadow-lg shadow-[#f6465d]/10'}`}
@@ -574,7 +760,7 @@ export default function Home() {
                   {isPending || isConfirming ? <Clock className="animate-spin w-5 h-5" /> : (isLongSelection ? <TrendingUp className="w-5 h-5" /> : <TrendingDown className="w-5 h-5" />)}
                   {isLongSelection ? '상승 포지션 진입 (LONG)' : '하락 포지션 진입 (SHORT)'}
                 </button>
-                
+
                 {!mounted || !isConnected ? (
                   <p className="text-[10px] text-[#f6465d] text-center font-bold font-mono animate-pulse underline">지갑을 먼저 연결해 주세요!</p>
                 ) : null}
@@ -599,13 +785,13 @@ export default function Home() {
                   <p className="text-sm font-black text-[#0ecb81]">HEALTHY</p>
                 </div>
               </div>
-              <button 
+              <button
                 onClick={handleDepositLiquidity} disabled={isPending || isConfirming}
                 className="w-full bg-[#fcd535] text-black hover:bg-[#fcd535]/80 py-3 rounded-lg text-xs font-bold transition flex items-center justify-center gap-2 mb-2"
               >
                 <ArrowRightLeft className="w-4 h-4" /> 유동성 0.03 ETH 추가 공급
               </button>
-              <button 
+              <button
                 onClick={handleWithdraw} disabled={isPending || isConfirming}
                 className="w-full border border-[#f6465d] text-[#f6465d] hover:bg-[#f6465d]/10 py-3 rounded-lg text-[10px] font-bold transition"
               >
@@ -623,9 +809,7 @@ export default function Home() {
           <span>지연시간: 12ms</span>
           <span className="text-[#fcd535]">Sepolia Testnet</span>
         </div>
-        <div>
-          © 2026 ETH Trader Pro v2.0 - Blockchain Middle Test
-        </div>
+        <div>© 2026 ETH Trader Pro v2.0 - Blockchain Middle Test</div>
       </footer>
     </div>
   )
