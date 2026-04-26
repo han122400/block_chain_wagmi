@@ -1,0 +1,104 @@
+  // ─── 어드민 기능 (추가 핸들러들) ───────────────────────────────────────────
+  
+  // 1. 유동성 공급 (PHB)
+  const handleAdminAddLiquidity = async () => {
+    if (!address || isAdminLoading) return
+    const phbAmount = parseFloat(liqPhbAmount)
+    if (isNaN(phbAmount) || phbAmount <= 0) {
+      setAdminStatus('❌ 올바른 PHB 수량을 입력하세요.')
+      return
+    }
+    setIsAdminLoading(true)
+    setAdminStatus('처리 중...')
+    try {
+      const res = await fetch('/api/admin/add-liquidity', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ callerAddress: address, phbAmount }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error)
+      setAdminStatus(`✅ ${phbAmount} PHB 풀 이동 완료!`)
+      refreshData()
+    } catch (e: any) {
+      setAdminStatus(`❌ ${e.message}`)
+    } finally {
+      setIsAdminLoading(false)
+    }
+  }
+
+  // 2. DB 초기화
+  const [isResetting, setIsResetting] = useState(false)
+  const [resetStatus, setResetStatus] = useState('')
+  const handleAdminResetDb = async (resetPrice: boolean) => {
+    if (!address || isResetting || !confirm('DB를 초기화하시겠습니까?')) return
+    setIsResetting(true)
+    setResetStatus('초기화 중...')
+    try {
+      const res = await fetch('/api/admin/reset-db', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ callerAddress: address, resetPrice }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error)
+      setResetStatus(`✅ ${data.message}`)
+      refreshData()
+    } catch (e: any) {
+      setResetStatus(`❌ ${e.message}`)
+    } finally {
+      setIsResetting(false)
+    }
+  }
+
+  // 3. 온체인 ETH 회수용 훅
+  const { data: ethWithdrawHash, isPending: isEthWithdrawPending, writeContract: writeEthWithdraw, error: ethWithdrawError } = useWriteContract()
+  const { isLoading: isEthWithdrawConfirming, isSuccess: isEthWithdrawConfirmed } = useWaitForTransactionReceipt({ hash: ethWithdrawHash })
+
+  // 4. [핵심] 어드민 거래소 모든 자산 회수 (PHB + ETH 통합)
+  const handleAdminFullExit = async () => {
+    if (!address || isAdminLoading || isEthWithdrawPending) return
+    if (!confirm('거래소 풀의 모든 PHB를 내 잔고로 옮기고, 컨트랙트의 모든 ETH를 지갑으로 즉시 회수합니다.\n진행하시겠습니까?')) return
+
+    setIsAdminLoading(true)
+    setAdminStatus('PHB 회수 중...')
+
+    try {
+      // Step A: DB PHB 회수
+      const res = await fetch('/api/admin/emergency-withdraw', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ callerAddress: address }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error)
+      
+      setAdminStatus('✅ PHB 회수 완료! 이제 MetaMask 서명으로 ETH를 회수합니다...')
+
+      // Step B: 온체인 ETH 전액 회수 (emergencyWithdraw)
+      writeEthWithdraw({
+        address:      PHB_EXCHANGE_ADDRESS,
+        abi:          PHB_EXCHANGE_ABI,
+        functionName: 'emergencyWithdraw',
+      })
+    } catch (e: any) {
+      setAdminStatus(`❌ ${e.message}`)
+      setIsAdminLoading(false)
+    }
+  }
+
+  // ETH 회수 TX 성공 후 마무리
+  useEffect(() => {
+    if (!isEthWithdrawConfirmed || !ethWithdrawHash) return
+    setAdminStatus('✅ 거래소 모든 자산(PHB/ETH) 회수 성공!')
+    setIsAdminLoading(false)
+    refreshData()
+    setTimeout(() => setAdminStatus(''), 8000)
+  }, [isEthWithdrawConfirmed, ethWithdrawHash])
+
+  useEffect(() => {
+    if (!ethWithdrawError) return
+    const msg = (ethWithdrawError as any).shortMessage ?? ethWithdrawError.message ?? '오류'
+    setAdminStatus(`❌ ETH 회수 실패: ${msg}`)
+    setIsAdminLoading(false)
+  }, [ethWithdrawError])

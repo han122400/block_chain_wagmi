@@ -1,0 +1,121 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("POSTGRES_PRISMA_URL")          // Vercel Postgres (pgbouncer 풀링)
+  directUrl = env("POSTGRES_URL_NON_POOLING")     // 마이그레이션 전용 직접 연결
+}
+
+// ─── 사용자 테이블 ────────────────────────────────────────────────────────────
+// MetaMask 지갑 주소를 기준으로 PHB 잔액을 관리합니다.
+model User {
+  id          String       @id @default(cuid())
+  address     String       @unique              // MetaMask 주소 (소문자 정규화)
+  phbBalance  Float        @default(0)          @map("phb_balance")
+  createdAt   DateTime     @default(now())      @map("created_at")
+  updatedAt   DateTime     @updatedAt           @map("updated_at")
+
+  positions   Position[]
+  deposits    DepositLog[]
+
+  @@map("users")
+}
+
+// ─── 오프체인 포지션 테이블 ───────────────────────────────────────────────────
+// 포지션 오픈/클로즈는 DB에서만 처리 (온체인 트랜잭션 없음 → 딜레이 0)
+model Position {
+  id           String    @id @default(cuid())
+  userAddress  String    @map("user_address")
+  marginPhb    Float     @map("margin_phb")     // 증거금 (PHB)
+  entryPrice   Float     @map("entry_price")    // 진입 시 시세
+  leverage     Int                               // 레버리지 배율 (1~100)
+  isLong       Boolean   @map("is_long")        // true=롱, false=숏
+  isOpen       Boolean   @default(true)         @map("is_open")
+  openedAt     DateTime  @default(now())        @map("opened_at")
+  closedAt     DateTime?                        @map("closed_at")
+  exitPrice    Float?                           @map("exit_price")
+  pnlPhb       Float?                           @map("pnl_phb")     // 손익 (PHB)
+  isProfit     Boolean?                         @map("is_profit")
+
+  user         User      @relation(fields: [userAddress], references: [address])
+
+  @@map("positions")
+}
+
+
+// ─── ETH 충전 기록 테이블 ─────────────────────────────────────────────────────
+// txHash를 unique로 관리하여 같은 트랜잭션으로 이중 충전 방지
+model DepositLog {
+  id          String   @id @default(cuid())
+  userAddress String   @map("user_address")
+  txHash      String   @unique @map("tx_hash")   // Sepolia 트랜잭션 해시
+  ethAmount   Float    @map("eth_amount")          // ETH 단위
+  phbAmount   Float    @map("phb_amount")          // 지급된 PHB
+  createdAt   DateTime @default(now())             @map("created_at")
+
+  user        User     @relation(fields: [userAddress], references: [address])
+
+  @@map("deposit_logs")
+}
+
+// ─── 공유 캔들 차트 테이블 ────────────────────────────────────────────────────
+// 서버가 1초마다 가격을 생성하고 DB에 저장.
+// 모든 클라이언트가 이 데이터를 폴링하여 동일한 차트를 봅니다.
+model PriceCandle {
+  id          Int      @id @default(autoincrement())
+  candleIndex Int      @unique @map("candle_index")  // 캔들 순번 (5틱 = 1캔들)
+  label       String                                 // 표시 시각 (HH:MM:SS)
+  open        Float
+  close       Float
+  high        Float
+  low         Float
+  tickCount   Int      @default(0) @map("tick_count") // 캔들 내 누적 틱 수
+  isClosed    Boolean  @default(false) @map("is_closed") // 캔들 확정 여부
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt      @map("updated_at")
+
+  @@map("price_candles")
+}
+
+// ─── 가격 상태 싱글톤 ─────────────────────────────────────────────────────────
+// id=1 의 단일 행으로 현재 가격 엔진 상태를 관리합니다.
+model PriceState {
+  id            Int      @id @default(1)
+  currentPrice  Float    @default(0.052450) @map("current_price")
+  currentTick   Int      @default(0)        @map("current_tick")  // 전체 틱 누적
+  currentCandle Int      @default(0)        @map("current_candle") // 현재 캔들 인덱스
+  trend         Float    @default(0)                               // 가격 모멘텀
+  lastTickAt    DateTime @default(now())    @map("last_tick_at")   // 마지막 틱 시각
+  updatedAt     DateTime @updatedAt         @map("updated_at")
+
+  @@map("price_state")
+}
+
+// ─── 거래소 풀 상태 싱글톤 ─────────────────────────────────────────────────────
+// id=1 의 단일 행으로 거래소 전체 유동성 상태를 관리합니다.
+// totalLiquidityEth: 관리자가 컨트랙트에 예치한 ETH 누계 (wei 단위가 아닌 ETH)
+// totalIssuedPhb:    User들에게 지급된 PHB 누계 (모든 deposit의 phbAmount 합산)
+model ExchangePool {
+  id                Int      @id @default(1)
+  totalLiquidityEth Float    @default(0) @map("total_liquidity_eth") // 레거시 (미사용)
+  totalIssuedPhb    Float    @default(0) @map("total_issued_phb")    // 전체 발행 PHB 누계
+  adminPoolPhb      Float    @default(0) @map("admin_pool_phb")      // 관리자가 풀에 공급한 PHB
+  updatedAt         DateTime @updatedAt  @map("updated_at")
+
+  @@map("exchange_pool")
+}
+
+// ─── 거래소 입장 세션 ──────────────────────────────────────────────────────────
+// 사용자가 0.01 ETH 입장료를 납부한 기록. 24시간 유효.
+// 같은 주소는 upsert로 관리 (1명 = 1행)
+model UserSession {
+  id            String   @id @default(cuid())
+  userAddress   String   @unique @map("user_address")
+  paidAt        DateTime @default(now()) @map("paid_at")      // 마지막 납부 시각
+  expiresAt     DateTime @map("expires_at")                   // 만료 시각 (paidAt + 24h)
+  txHash        String   @map("tx_hash")                      // 납부 tx 해시
+
+  @@map("user_sessions")
+}
