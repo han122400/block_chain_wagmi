@@ -12,9 +12,14 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: '지갑 주소가 필요합니다.' }, { status: 400 })
   }
 
-  const position = await prisma.position.findFirst({
-    where: { userAddress: address, isOpen: true },
-  })
+  try {
+    const position = await prisma.position.findFirst({
+      where: { userAddress: address, isOpen: true },
+    })
 
-  return NextResponse.json({ position: position ?? null })
+    return NextResponse.json({ position: position ?? null })
+  } catch (error) {
+    console.error('[/api/trade/position]', error)
+    return NextResponse.json({ error: '포지션 조회 실패' }, { status: 500 })
+  }
 }
