@@ -143,6 +143,19 @@ export default function Home() {
   const [adminStatus, setAdminStatus] = useState('')
   const [liqPhbAmount, setLiqPhbAmount] = useState('100')
   const [isAdminLoading, setIsAdminLoading] = useState(false)
+  const adminPanelRef = useRef<HTMLDivElement>(null)
+
+  const handleGoAdminPanel = () => {
+    if (!mounted || !isConnected) {
+      alert('관리자 패널은 지갑 연결 후 접근할 수 있습니다.')
+      return
+    }
+    if (!isAdmin) {
+      alert('관리자 권한(OWNER)이 필요합니다.')
+      return
+    }
+    adminPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
 
   // ─── 관리자 핸들러 ───────────────────────────────────────────────────────
   const handleAdminAddLiquidity = async () => {
@@ -761,7 +774,14 @@ export default function Home() {
           </div>
           <div className="hidden md:flex gap-6 text-sm font-medium text-[#848e9c]">
             <span className="text-[#fcd535] cursor-pointer">거래소</span>
-            <span className="hover:text-white cursor-pointer transition-colors">마진</span>
+            <button
+              type="button"
+              onClick={handleGoAdminPanel}
+              className={`flex items-center gap-1 transition-colors ${isAdmin ? 'text-[#f6465d] hover:text-[#ff5b6f]' : 'hover:text-white'}`}
+            >
+              <ShieldAlert className="w-3.5 h-3.5" />
+              관리자
+            </button>
           </div>
         </div>
         <div className="flex items-center gap-4">
@@ -945,7 +965,7 @@ export default function Home() {
 
           {/* 관리자 전용 기능 (mounted 필수: Hydration mismatch 방지) */}
           {mounted && isAdmin && (
-            <div className="bg-[#181a20] rounded-xl p-5 border border-[#f6465d]/50">
+            <div ref={adminPanelRef} id="admin-panel" className="bg-[#181a20] rounded-xl p-5 border border-[#f6465d]/50">
               <div className="flex items-center justify-between mb-3">
                 <span className="text-xs font-black text-[#f6465d] flex items-center gap-1.5">
                   <ShieldAlert className="w-4 h-4" /> ADMIN PANEL
