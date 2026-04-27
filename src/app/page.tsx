@@ -51,6 +51,49 @@ type ExchangeStats = {
   activeMarginPhb: number
 }
 
+type CandleShapeProps = {
+  x?: number
+  y?: number
+  width?: number
+  height?: number
+  value?: [number, number]
+  payload?: {
+    open?: number
+    close?: number
+    high?: number
+    low?: number
+    candleRange?: [number, number]
+  }
+}
+
+function CandleShape(props: CandleShapeProps) {
+  const { x = 0, y = 0, width = 0, height = 0, payload, value } = props
+  const candleRange = payload?.candleRange ?? value
+  if (!Array.isArray(candleRange) || candleRange.length < 2) return null
+
+  const low = Number(payload?.low ?? candleRange[0])
+  const high = Number(payload?.high ?? candleRange[1])
+  const open = Number(payload?.open ?? low)
+  const close = Number(payload?.close ?? high)
+  if (![open, close, high, low].every(Number.isFinite)) return null
+
+  const isUp = close >= open
+  const color = isUp ? '#0ecb81' : '#f6465d'
+  const priceRange = high - low
+  const px = priceRange > 0 ? height / priceRange : 0
+  const openY = y + (high - open) * px
+  const closeY = y + (high - close) * px
+  const bodyTop = Math.min(openY, closeY)
+  const bodyBot = Math.max(openY, closeY)
+
+  return (
+    <g>
+      <line x1={x + width / 2} y1={y} x2={x + width / 2} y2={y + height} stroke={color} strokeWidth={1} />
+      <rect x={x + 2} y={bodyTop} width={Math.max(width - 4, 1)} height={Math.max(bodyBot - bodyTop, 1)} fill={color} />
+    </g>
+  )
+}
+
 // ─── API 헬퍼 ─────────────────────────────────────────────────────────────────
 async function fetchPHBBalance(address: string): Promise<number> {
   const res = await fetch(`/api/phb/balance?address=${address}`, { cache: 'no-store' })
@@ -772,30 +815,9 @@ export default function Home() {
       minP = Math.min(minP, activePosition.entryPrice * 0.999)
       maxP = Math.max(maxP, activePosition.entryPrice * 1.001)
     }
-    const pad = (maxP - minP) * 0.1
+    const pad = Math.max((maxP - minP) * 0.1, maxP * 0.002)
     return [minP - pad, maxP + pad] as [number, number]
   }, [candles, liquidationPrice, activePosition])
-
-  // ─── 캔들 렌더러 ────────────────────────────────────────────────────────────
-  const Candle = (props: any) => {
-    const { x, y, width, height, payload } = props
-    const { open, close, high, low, candleRange } = payload ?? {}
-    if (!candleRange) return null
-    const isUp        = close >= open
-    const color       = isUp ? '#0ecb81' : '#f6465d'
-    const priceRange  = high - low
-    const px          = priceRange > 0 ? height / priceRange : 0
-    const openY       = y + (high - open) * px
-    const closeY      = y + (high - close) * px
-    const bodyTop     = Math.min(openY, closeY)
-    const bodyBot     = Math.max(openY, closeY)
-    return (
-      <g>
-        <line x1={x + width / 2} y1={y} x2={x + width / 2} y2={y + height} stroke={color} strokeWidth={1} />
-        <rect x={x + 2} y={bodyTop} width={Math.max(width - 4, 1)} height={Math.max(bodyBot - bodyTop, 1)} fill={color} />
-      </g>
-    )
-  }
 
   // ─────────────────────────────────────────────────────────────────────────────
   return (
@@ -970,7 +992,7 @@ export default function Home() {
                       <ReferenceLine y={activePosition.entryPrice} stroke={activePosition.isLong ? '#0ecb81' : '#f6465d'} strokeWidth={2}
                         label={{ value: `● 진입가 ${activePosition.entryPrice.toFixed(6)} (${activePosition.isLong ? 'LONG' : 'SHORT'})`, position: 'insideBottomLeft', fill: activePosition.isLong ? '#0ecb81' : '#f6465d', fontSize: 11, fontWeight: 700 }} />
                     )}
-                    <Bar dataKey="candleRange" shape={<Candle />} animationDuration={0} isAnimationActive={false}>
+                    <Bar dataKey="candleRange" shape={<CandleShape />} animationDuration={0} isAnimationActive={false}>
                       {candles.map((e, i) => (
                         <Cell key={i} fill={e.close >= e.open ? '#0ecb81' : '#f6465d'} />
                       ))}
