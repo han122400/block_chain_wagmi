@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
 import { advancePriceTicks } from '@/lib/priceEngine'
 
+export const runtime = 'nodejs'
+export const dynamic = 'force-dynamic'
+
 // 화면에 표시할 최대 캔들 수 (1시간 = 720개, UI는 최근 80개만 표시)
 const RETENTION_MS   = 60 * 60 * 1000   // 1시간 (priceEngine과 동일)
 const MAX_RETURN     = 720               // 반환 최대값도 1시간치로 제한
