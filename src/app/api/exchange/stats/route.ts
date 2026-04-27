@@ -43,6 +43,8 @@ export async function GET() {
       totalLiquidityPhb,                         // PHB LIQUIDITY
       totalIssuedPhb:    liveIssuedPhb,          // TOTAL PHB
       activeMarginPhb,                           // 현재 포지션에 잠긴 PHB
+    }, {
+      headers: { 'Cache-Control': 'no-store' },
     })
   } catch (e) {
     console.error('[exchange/stats]', e)

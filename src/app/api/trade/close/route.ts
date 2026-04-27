@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
 
-const MAINTENANCE_MARGIN_RATE = 0.50  // 청산 유지증거금률 50%
+const MAINTENANCE_MARGIN_RATE = 0.25  // 청산 유지증거금률 25%
 
 function calcFeeRate(leverage: number): number {
   return 30 + Math.floor(((leverage - 1) * 20) / 99)

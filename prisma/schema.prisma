@@ -41,6 +41,7 @@ model Position {
 
   user         User      @relation(fields: [userAddress], references: [address])
 
+  @@index([userAddress, isOpen])
   @@map("positions")
 }
 

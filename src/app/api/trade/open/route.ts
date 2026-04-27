@@ -37,16 +37,21 @@ export async function POST(req: NextRequest) {
     }
 
     const result = await prisma.$transaction(async (tx: any) => {
-      // PHB 잔액 확인
-      const user = await tx.user.findUnique({ where: { address: normalizedAddress } })
+      const [user, existingPosition] = await Promise.all([
+        tx.user.findUnique({
+          where: { address: normalizedAddress },
+          select: { phbBalance: true },
+        }),
+        tx.position.findFirst({
+          where: { userAddress: normalizedAddress, isOpen: true },
+          select: { id: true },
+        }),
+      ])
+
       if (!user || user.phbBalance < margin) {
         throw new Error('PHB 잔액이 부족합니다.')
       }
 
-      // 기존 오픈 포지션 확인 (1개만 허용)
-      const existingPosition = await tx.position.findFirst({
-        where: { userAddress: normalizedAddress, isOpen: true },
-      })
       if (existingPosition) {
         throw new Error('이미 오픈된 포지션이 있습니다.')
       }

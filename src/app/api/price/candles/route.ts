@@ -58,6 +58,8 @@ export async function GET(req: NextRequest) {
         isClosed:    c.isClosed,
         candleRange: [c.low, c.high],   // Recharts BarChart용
       })),
+    }, {
+      headers: { 'Cache-Control': 'no-store' },
     })
   } catch (error) {
     console.error('[/api/price/candles]', error)

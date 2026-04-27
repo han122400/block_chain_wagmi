@@ -16,9 +16,15 @@ import {
 } from 'lucide-react'
 
 // ─── 상수 ─────────────────────────────────────────────────────────────────────
-const MAINTENANCE_MARGIN_RATE = 0.50
+const MAINTENANCE_MARGIN_RATE = 0.25
 const PHB_PER_ETH_UNIT        = 10     // 0.001 ETH = 10 PHB
 const ETH_UNIT                = 0.001  // 충전 단위 (ETH)
+const PRICE_POLL_MS           = 1000
+const EXCHANGE_STATS_POLL_MS  = 1000
+const ACCOUNT_DATA_POLL_MS    = 1000
+const DEPOSIT_MIN_ETH         = 0.001
+const DEPOSIT_MAX_ETH         = 0.05
+const DEPOSIT_STEP_ETH        = 0.001
 
 function calcLiquidationPrice(entryPrice: number, leverage: number, isLong: boolean): number {
   const bufferRatio = 1 - MAINTENANCE_MARGIN_RATE
@@ -38,23 +44,36 @@ type ActivePosition = {
   openedAt: string
 }
 
+type ExchangeStats = {
+  adminPoolPhb: number
+  totalLiquidityPhb: number
+  totalIssuedPhb: number
+  activeMarginPhb: number
+}
+
 // ─── API 헬퍼 ─────────────────────────────────────────────────────────────────
 async function fetchPHBBalance(address: string): Promise<number> {
-  const res = await fetch(`/api/phb/balance?address=${address}`)
+  const res = await fetch(`/api/phb/balance?address=${address}`, { cache: 'no-store' })
   const data = await res.json()
   return data.phbBalance ?? 0
 }
 
 async function fetchOpenPosition(address: string): Promise<ActivePosition | null> {
-  const res = await fetch(`/api/trade/position?address=${address}`)
+  const res = await fetch(`/api/trade/position?address=${address}`, { cache: 'no-store' })
   const data = await res.json()
   return data.position ?? null
 }
 
 async function fetchHistory(limit = 10): Promise<any[]> {
-  const res = await fetch(`/api/trade/history?limit=${limit}`)
+  const res = await fetch(`/api/trade/history?limit=${limit}`, { cache: 'no-store' })
   const data = await res.json()
   return data.history ?? []
+}
+
+async function fetchExchangeStats(): Promise<ExchangeStats> {
+  const res = await fetch('/api/exchange/stats', { cache: 'no-store' })
+  if (!res.ok) throw new Error('exchange stats fetch failed')
+  return res.json()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -79,6 +98,15 @@ export default function Home() {
   // ─── 충전 관련 ─────────────────────────────────────────────────────────────
   const [depositEthAmount, setDepositEthAmount] = useState('0.001')   // 충전할 ETH
   const [depositStatus, setDepositStatus]       = useState<string>('')
+  const depositEthValue = Number(depositEthAmount)
+  const depositPhbAmount = Math.round(depositEthValue / ETH_UNIT) * PHB_PER_ETH_UNIT
+
+  const handleDepositAmountChange = (value: string) => {
+    const next = Number(value)
+    if (Number.isNaN(next)) return
+    const clamped = Math.min(DEPOSIT_MAX_ETH, Math.max(DEPOSIT_MIN_ETH, next))
+    setDepositEthAmount(clamped.toFixed(3))
+  }
 
   // ─── 인출 관련 ─────────────────────────────────────────────────────────────
   const [withdrawPhbAmount, setWithdrawPhbAmount] = useState('10')
@@ -106,12 +134,6 @@ export default function Home() {
   const [entryStatus, setEntryStatus] = useState('')
 
   // ─── 거래소 통계 ──────────────────────────────────────────────────
-  type ExchangeStats = {
-    adminPoolPhb: number
-    totalLiquidityPhb: number
-    totalIssuedPhb: number
-    activeMarginPhb: number
-  }
   const [exchangeStats, setExchangeStats] = useState<ExchangeStats | null>(null)
 
 
@@ -144,6 +166,7 @@ export default function Home() {
   const [liqPhbAmount, setLiqPhbAmount] = useState('100')
   const [isAdminLoading, setIsAdminLoading] = useState(false)
   const adminPanelRef = useRef<HTMLDivElement>(null)
+  const isAdminUi = mounted && isAdmin
 
   const handleGoAdminPanel = () => {
     if (!mounted || !isConnected) {
@@ -369,7 +392,7 @@ export default function Home() {
 
     const poll = async () => {
       try {
-        const res  = await fetch('/api/price/candles?limit=80')
+        const res  = await fetch('/api/price/candles?limit=80', { cache: 'no-store' })
         if (!res.ok) throw new Error('fetch failed')
         const data = await res.json()
 
@@ -398,32 +421,32 @@ export default function Home() {
     }
 
     poll()  // 즉시 첫 번째 호출
-    const interval = setInterval(poll, 1000)
+    const interval = setInterval(poll, PRICE_POLL_MS)
     return () => { stopped = true; clearInterval(interval) }
   }, [])
 
-  // 거래소 통계 폴링 (3초마다)
+  // 거래소 통계 폴링
   useEffect(() => {
     let stopped = false
     const fetchStats = async () => {
       try {
-        const res = await fetch('/api/exchange/stats')
-        const data = await res.json()
+        const data = await fetchExchangeStats()
         if (!stopped) setExchangeStats(data)
       } catch { /* silent */ }
     }
     fetchStats()
-    const interval = setInterval(fetchStats, 3000)
+    const interval = setInterval(fetchStats, EXCHANGE_STATS_POLL_MS)
     return () => { stopped = true; clearInterval(interval) }
   }, [])
 
   // ─── 데이터 새로고침 ────────────────────────────────────────────────────────
   const refreshData = useCallback(async () => {
     if (!address || !mounted) return   // address & mount 이중 방어
-    const [balRes, posRes, histRes] = await Promise.allSettled([
+    const [balRes, posRes, histRes, statsRes] = await Promise.allSettled([
       fetchPHBBalance(address),
       fetchOpenPosition(address),
       fetchHistory(10),
+      fetchExchangeStats(),
     ])
 
     if (balRes.status === 'fulfilled') {
@@ -436,13 +459,16 @@ export default function Home() {
     if (histRes.status === 'fulfilled') {
       setTradeHistory(histRes.value)
     }
+    if (statsRes.status === 'fulfilled') {
+      setExchangeStats(statsRes.value)
+    }
   }, [address, mounted])
 
-  // 지갑 연결 시 + 5초마다 폴링
+  // 지갑 연결 시 + 주기적 폴링
   useEffect(() => {
     if (!address) return
     refreshData()
-    const interval = setInterval(refreshData, 5000)
+    const interval = setInterval(refreshData, ACCOUNT_DATA_POLL_MS)
     return () => clearInterval(interval)
   }, [address, refreshData])
 
@@ -483,21 +509,40 @@ export default function Home() {
 
   // ─── 자동 청산 감지 ─────────────────────────────────────────────────────────
   useEffect(() => {
-    if (!activePosition || !liquidationPrice || liquidatedRef.current) return
+    if (!address || !activePosition || !liquidationPrice || liquidatedRef.current) return
     const isLiquidated = activePosition.isLong
       ? currentPrice <= liquidationPrice
       : currentPrice >= liquidationPrice
     if (isLiquidated) {
       liquidatedRef.current = true
       setLiquidationAlert(true)
-      // 자동 포지션 종료 API 호출
+      setActivePosition(null)
+      setTradeStatus('⚠️ 청산가 도달 - 포지션 자동 종료')
+
       fetch('/api/trade/close', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ address, exitPrice: currentPrice }),
-      }).then(() => {
+      })
+      .then(r => r.json())
+      .then(data => {
+        if (data.success) {
+          setPhbBalance(data.phbBalance)
+        } else {
+          liquidatedRef.current = false
+          setActivePosition(activePosition)
+          setTradeStatus(`⚠️ 자동 청산 실패: ${data.error}`)
+        }
+      })
+      .catch(() => {
+        liquidatedRef.current = false
+        setActivePosition(activePosition)
+        setTradeStatus('⚠️ 자동 청산 실패: 네트워크 오류')
+      })
+      .finally(() => {
         refreshData()
         setTimeout(() => setLiquidationAlert(false), 5000)
+        setTimeout(() => setTradeStatus(''), 5000)
       })
     }
   }, [currentPrice, activePosition, liquidationPrice, address, refreshData])
@@ -544,8 +589,10 @@ export default function Home() {
 
   const handleDeposit = () => {
     const eth = parseFloat(depositEthAmount)
-    if (isNaN(eth) || eth < ETH_UNIT || eth % ETH_UNIT > 0.0000001) {
-      setDepositStatus('⚠️ 0.001 ETH 단위로 입력해주세요.')
+    const units = Math.round(eth / ETH_UNIT)
+    const isValidStep = Math.abs(eth - units * ETH_UNIT) < 0.0000001
+    if (isNaN(eth) || eth < DEPOSIT_MIN_ETH || eth > DEPOSIT_MAX_ETH || !isValidStep) {
+      setDepositStatus('⚠️ 0.001~0.05 ETH 범위에서 0.001 ETH 단위로 선택해주세요.')
       return
     }
     setDepositStatus('MetaMask 서명 대기 중...')
@@ -553,7 +600,7 @@ export default function Home() {
       address: PHB_EXCHANGE_ADDRESS,
       abi: PHB_EXCHANGE_ABI,
       functionName: 'depositETH',
-      value: parseEther(depositEthAmount),
+      value: parseEther(eth.toFixed(3)),
     })
   }
 
@@ -585,6 +632,7 @@ export default function Home() {
         if (data.success) {
           setPhbBalance(data.newPhbBalance)
           setWithdrawStatus(`✅ 인출 완료! ${pendingWithdrawPhb} PHB → ETH 전송됨`)
+          refreshData()
         } else {
           setWithdrawStatus(`⚠️ ${data.error}`)
         }
@@ -592,7 +640,7 @@ export default function Home() {
         setTimeout(() => setWithdrawStatus(''), 6000)
       })
       .catch(() => setWithdrawStatus('⚠️ 서버 오류'))
-  }, [isWithdrawConfirmed, withdrawTxHash, address, pendingWithdrawPhb])
+  }, [isWithdrawConfirmed, withdrawTxHash, address, pendingWithdrawPhb, refreshData])
 
   // writeContract 오류 처리
   useEffect(() => {
@@ -633,8 +681,22 @@ export default function Home() {
       setTradeStatus('⚠️ PHB 잔액이 부족합니다.')
       return
     }
+    const optimisticPosition: ActivePosition = {
+      id: `pending-${Date.now()}`,
+      marginPhb: margin,
+      entryPrice: currentPrice,
+      leverage,
+      isLong: isLongSelection,
+      openedAt: new Date().toISOString(),
+    }
+    const previousBalance = phbBalance
+    const previousPosition = activePosition
+
     setIsTrading(true)
-    setTradeStatus('포지션 오픈 중...')
+    setTradeStatus(`✅ ${isLongSelection ? 'LONG' : 'SHORT'} 포지션 즉시 진입`)
+    setPhbBalance(previousBalance - margin)
+    setActivePosition(optimisticPosition)
+
     try {
       const res = await fetch('/api/trade/open', {
         method: 'POST',
@@ -652,10 +714,15 @@ export default function Home() {
         setTradeStatus(`✅ ${isLongSelection ? 'LONG' : 'SHORT'} 포지션 오픈!`)
         setPhbBalance(data.phbBalance)
         setActivePosition(data.position)
+        refreshData()
       } else {
+        setPhbBalance(previousBalance)
+        setActivePosition(previousPosition)
         setTradeStatus(`⚠️ ${data.error}`)
       }
     } catch {
+      setPhbBalance(previousBalance)
+      setActivePosition(previousPosition)
       setTradeStatus('⚠️ 네트워크 오류')
     } finally {
       setIsTrading(false)
@@ -701,13 +768,18 @@ export default function Home() {
       minP = Math.min(minP, liquidationPrice * 0.999)
       maxP = Math.max(maxP, liquidationPrice * 1.001)
     }
+    if (activePosition) {
+      minP = Math.min(minP, activePosition.entryPrice * 0.999)
+      maxP = Math.max(maxP, activePosition.entryPrice * 1.001)
+    }
     const pad = (maxP - minP) * 0.1
     return [minP - pad, maxP + pad] as [number, number]
-  }, [candles, liquidationPrice])
+  }, [candles, liquidationPrice, activePosition])
 
   // ─── 캔들 렌더러 ────────────────────────────────────────────────────────────
   const Candle = (props: any) => {
-    const { x, y, width, height, open, close, high, low, candleRange } = props
+    const { x, y, width, height, payload } = props
+    const { open, close, high, low, candleRange } = payload ?? {}
     if (!candleRange) return null
     const isUp        = close >= open
     const color       = isUp ? '#0ecb81' : '#f6465d'
@@ -777,7 +849,7 @@ export default function Home() {
             <button
               type="button"
               onClick={handleGoAdminPanel}
-              className={`flex items-center gap-1 transition-colors ${isAdmin ? 'text-[#f6465d] hover:text-[#ff5b6f]' : 'hover:text-white'}`}
+              className={`flex items-center gap-1 transition-colors ${isAdminUi ? 'text-[#f6465d] hover:text-[#ff5b6f]' : 'hover:text-white'}`}
             >
               <ShieldAlert className="w-3.5 h-3.5" />
               관리자
@@ -1143,23 +1215,34 @@ export default function Home() {
               <div className="bg-[#0b0e11] rounded-lg p-3 mb-4 flex items-center justify-between">
                 <div className="text-center">
                   <p className="text-[10px] text-[#848e9c]">입금</p>
-                  <p className="text-sm font-black text-white">0.001 ETH</p>
+                  <p className="text-sm font-black text-white">{depositEthAmount} ETH</p>
                 </div>
                 <ArrowRightLeft className="w-4 h-4 text-[#fcd535]" />
                 <div className="text-center">
                   <p className="text-[10px] text-[#848e9c]">지급</p>
-                  <p className="text-sm font-black text-[#fcd535]">10 PHB</p>
+                  <p className="text-sm font-black text-[#fcd535]">{depositPhbAmount} PHB</p>
                 </div>
               </div>
 
               {/* 충전 입력 */}
-              <div className="flex gap-2 mb-3">
-                {['0.001', '0.005', '0.01'].map(amt => (
-                  <button key={amt} onClick={() => setDepositEthAmount(amt)}
-                    className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all ${depositEthAmount === amt ? 'bg-[#fcd535] text-black' : 'bg-[#2b3139] text-[#848e9c] hover:bg-[#363c44]'}`}>
-                    {amt} ETH
-                  </button>
-                ))}
+              <div className="mb-4 rounded-lg bg-[#0b0e11] border border-[#2b3139] p-3">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-[10px] text-[#848e9c] font-bold">충전 수량</span>
+                  <span className="text-xs font-mono font-black text-[#fcd535]">{depositEthAmount} ETH</span>
+                </div>
+                <input
+                  type="range"
+                  min={DEPOSIT_MIN_ETH}
+                  max={DEPOSIT_MAX_ETH}
+                  step={DEPOSIT_STEP_ETH}
+                  value={depositEthAmount}
+                  onChange={e => handleDepositAmountChange(e.target.value)}
+                  className="w-full accent-[#fcd535]"
+                />
+                <div className="flex justify-between text-[9px] text-[#848e9c] mt-1 font-mono">
+                  <span>{DEPOSIT_MIN_ETH.toFixed(3)}</span>
+                  <span>{DEPOSIT_MAX_ETH.toFixed(3)}</span>
+                </div>
               </div>
 
               <button

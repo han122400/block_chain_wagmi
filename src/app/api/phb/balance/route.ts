@@ -12,6 +12,7 @@ const RECONCILE_BLOCK_WINDOW = 20000n
  */
 export async function GET(req: NextRequest) {
   const address = req.nextUrl.searchParams.get('address')?.toLowerCase() as `0x${string}` | undefined
+  const shouldReconcile = req.nextUrl.searchParams.get('reconcile') === '1'
 
   if (!address) {
     return NextResponse.json({ error: '지갑 주소가 필요합니다.' }, { status: 400 })
@@ -24,16 +25,16 @@ export async function GET(req: NextRequest) {
     create: { address, phbBalance: 0 },
   })
 
-  const pool = await prisma.exchangePool.upsert({
-    where: { id: 1 },
-    create: { id: 1, totalLiquidityEth: 0, totalIssuedPhb: 0, adminPoolPhb: 0 },
-    update: {},
-  })
-
-  // 온체인 입금은 성공했지만 프론트 반영 호출이 누락된 경우를 자동 복구
+  // 기본 잔액 조회는 DB만 읽는다. 온체인 복구는 느리므로 명시 요청 때만 실행한다.
   const rpcUrl = process.env.SEPOLIA_RPC_URL
-  if (rpcUrl) {
+  if (shouldReconcile && rpcUrl) {
     try {
+      const pool = await prisma.exchangePool.upsert({
+        where: { id: 1 },
+        create: { id: 1, totalLiquidityEth: 0, totalIssuedPhb: 0, adminPoolPhb: 0 },
+        update: {},
+      })
+
       const client = createPublicClient({
         chain: sepolia,
         transport: fallback([
@@ -121,5 +122,8 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  return NextResponse.json({ phbBalance: user.phbBalance })
+  return NextResponse.json(
+    { phbBalance: user.phbBalance },
+    { headers: { 'Cache-Control': 'no-store' } }
+  )
 }
